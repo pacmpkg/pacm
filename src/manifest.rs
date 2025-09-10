@@ -6,12 +6,16 @@ use crate::error::Result;
 pub struct Manifest {
     pub name: String,
     pub version: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "devDependencies", skip_serializing_if = "BTreeMap::is_empty")]
+    pub dev_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optionalDependencies", skip_serializing_if = "BTreeMap::is_empty")]
+    pub optional_dependencies: BTreeMap<String, String>,
 }
 
 impl Manifest {
-    pub fn new(name: String, version: String) -> Self { Self { name, version, dependencies: BTreeMap::new() } }
+    pub fn new(name: String, version: String) -> Self { Self { name, version, dependencies: BTreeMap::new(), dev_dependencies: BTreeMap::new(), optional_dependencies: BTreeMap::new() } }
 }
 
 pub fn load(path: &Path) -> Result<Manifest> {

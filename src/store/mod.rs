@@ -67,6 +67,28 @@ pub fn ensure_package(bytes: &[u8], integrity_hint: Option<&str>) -> Result<(Str
         if let Some(parent) = dest_path.parent() { fs::create_dir_all(parent)?; }
         e.unpack(&dest_path)?;
     }
+    // Some tarballs (especially scoped packages) extract as package/<pkgname>/... when
+    // the real package root is the inner directory. If we have exactly one child
+    // directory inside extract_root and it contains a package.json, promote its
+    // contents one level up so the stored package dir has package.json at the root.
+    let mut entries = Vec::new();
+    for d in fs::read_dir(&extract_root)? {
+        entries.push(d?);
+    }
+    if entries.len() == 1 {
+        let only = &entries[0];
+        let only_path = only.path();
+        if only.file_type()?.is_dir() && only_path.join("package.json").exists() {
+            for child in fs::read_dir(&only_path)? {
+                let child = child?;
+                let from = child.path();
+                let to = extract_root.join(child.file_name());
+                fs::rename(&from, &to)?;
+            }
+            // remove now-empty directory
+            fs::remove_dir(&only_path)?;
+        }
+    }
     fs::create_dir_all(dir.parent().unwrap())?;
     fs::rename(&tmp, &dir)?;
     Ok((computed_hex, computed_integrity))

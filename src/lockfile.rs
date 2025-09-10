@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf, fs};
 use crate::manifest::Manifest;
 use crate::error::Result;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct PackageEntry {
     pub version: Option<String>,
     #[serde(default)]
@@ -14,7 +14,7 @@ pub struct PackageEntry {
     pub dependencies: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Lockfile {
     pub format: u32,
     #[serde(default)]
@@ -31,11 +31,17 @@ impl Lockfile {
     pub fn sync_from_manifest(&mut self, manifest: &Manifest) {
         let root = self.packages.entry("".into()).or_insert(PackageEntry { version: Some(manifest.version.clone()), integrity: None, resolved: None, dependencies: BTreeMap::new() });
         root.version = Some(manifest.version.clone());
-        root.dependencies = manifest.dependencies.clone();
-        for (name, range) in &manifest.dependencies {
+        // Merge all dependency sections into the lockfile root dependencies so dev/optional are recorded
+        let mut merged: BTreeMap<String,String> = BTreeMap::new();
+        for (n, r) in &manifest.dependencies { merged.insert(n.clone(), r.clone()); }
+        for (n, r) in &manifest.dev_dependencies { merged.insert(n.clone(), r.clone()); }
+        for (n, r) in &manifest.optional_dependencies { merged.insert(n.clone(), r.clone()); }
+        root.dependencies = merged.clone();
+
+        // Ensure an entry exists for every declared package (including scoped names)
+        for (name, _range) in merged {
             let key = format!("node_modules/{}", name);
             self.packages.entry(key).or_insert(PackageEntry { version: None, integrity: None, resolved: None, dependencies: BTreeMap::new() });
-            let _ = range;
         }
     }
 }

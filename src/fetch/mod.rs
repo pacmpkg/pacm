@@ -24,7 +24,9 @@ impl Fetcher {
 
 	pub fn package_metadata(&self, name: &str) -> Result<NpmMetadata> {
 		if let Some(hit) = META_CACHE.lock().unwrap().get(name).cloned() { return Ok(hit); }
-		let url = format!("{}/{}", self.registry, name);
+		// NPM registry expects scoped package names to be URL-encoded (e.g. @scope%2Fpkg)
+		let encoded_name = if name.contains('/') { name.replace("/", "%2F") } else { name.to_string() };
+		let url = format!("{}/{}", self.registry, encoded_name);
 		let resp = CLIENT.get(&url).send().with_context(|| format!("GET {}", url))?;
 		if !resp.status().is_success() { anyhow::bail!("registry returned {} for {}", resp.status(), name); }
 		let meta: NpmMetadata = resp.json()?;
@@ -37,6 +39,30 @@ impl Fetcher {
 		if !resp.status().is_success() { anyhow::bail!("tarball fetch {} status {}", url, resp.status()); }
 		let bytes = resp.bytes()?;
 		Ok(bytes.to_vec())
+	}
+
+	/// Stream a tarball while invoking a callback with (downloaded_bytes, total_opt). Returns bytes.
+	pub fn download_tarball_stream<F>(&self, url: &str, mut on_progress: F) -> Result<Vec<u8>>
+	where F: FnMut(u64, Option<u64>) {
+		use std::io::Read;
+		let mut resp = CLIENT.get(url).send().with_context(|| format!("GET {}", url))?;
+		if !resp.status().is_success() { anyhow::bail!("tarball fetch {} status {}", url, resp.status()); }
+		let total = resp.content_length();
+		let mut buf: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+		let mut downloaded: u64 = 0;
+		let mut tmp = [0u8; 32 * 1024];
+		on_progress(0, total);
+		loop {
+			let n = resp.read(&mut tmp)?;
+			if n == 0 { break; }
+			buf.extend_from_slice(&tmp[..n]);
+			downloaded += n as u64;
+			// Throttle updates: every 64KiB or on completion
+			if downloaded % (64 * 1024) < n as u64 || total.map(|t| downloaded >= t).unwrap_or(false) {
+				on_progress(downloaded, total);
+			}
+		}
+		Ok(buf)
 	}
 }
 

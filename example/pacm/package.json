@@ -3,5 +3,8 @@
   "version": "0.1.0",
   "dependencies": {
     "express": "5.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0"
   }
 }
