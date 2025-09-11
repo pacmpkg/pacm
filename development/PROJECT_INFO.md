@@ -6,7 +6,7 @@ Fast, disk-efficient, secure JavaScript/TypeScript package manager written in Ru
 Provide an NPM / pnpm compatible developer experience with:
 - pnpm-style global, content-addressable store to eliminate duplicate package data
 - Ultra-fast installs via parallel fetch + streaming extraction + link phase
-- Deterministic, minimal lockfile format (`pacm-lock.json`) for reproducible builds
+- Deterministic, minimal lockfile format (`pacm.lockb`, binary) for reproducible builds
 - Strong integrity & (future) signature verification for supply‑chain security
 
 ## Core Principles
@@ -22,7 +22,7 @@ Provide an NPM / pnpm compatible developer experience with:
 CLI (pacm)
   ├─ Config Loader (env, pacmrc TBD)
   ├─ Package Manifest IO (package.json)
-  ├─ Lockfile Engine (pacm-lock.json)
+  ├─ Lockfile Engine (pacm.lockb, binary)
   ├─ Dependency Resolver (semver -> concrete versions)
   ├─ Fetch Orchestrator
   │    ├─ Registry API Client (npm registry REST)

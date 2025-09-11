@@ -1,4 +1,4 @@
-use pacm::manifest::{Manifest, write, load};
+use pacm::manifest::{load, write, Manifest};
 
 #[test]
 fn manifest_roundtrip() {

@@ -1,9 +1,10 @@
 pub mod cli;
+pub mod colors;
 pub mod error;
-pub mod manifest;
-pub mod lockfile;
-pub mod resolver;
 pub mod fetch;
-pub mod store;
-pub mod linker;
 pub mod fsutil;
+pub mod linker;
+pub mod lockfile;
+pub mod manifest;
+pub mod resolver;
+pub mod store;

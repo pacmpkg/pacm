@@ -1,4 +1,4 @@
-use pacm::lockfile::{Lockfile, write, load};
+use pacm::lockfile::{load, write, Lockfile};
 use pacm::manifest::Manifest;
 
 #[test]
@@ -8,7 +8,7 @@ fn lockfile_sync() {
     manifest.dependencies.insert("foo".into(), "^1.0.0".into());
     let mut lock = Lockfile::default();
     lock.sync_from_manifest(&manifest);
-    let lock_path = dir.path().join("pacm-lock.json");
+    let lock_path = dir.path().join("pacm.lockb");
     write(&lock, lock_path.clone()).unwrap();
     let loaded = load(&lock_path).unwrap();
     assert!(loaded.packages.contains_key(""));
