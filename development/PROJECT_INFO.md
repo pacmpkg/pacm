@@ -1,11 +1,11 @@
 # pacm Project Information
 
-Fast, disk-efficient, secure JavaScript/TypeScript package manager written in Rust.
+Fast, cache-first, blazing JavaScript/TypeScript package manager written in Rust.
 
 ## Vision
-Provide an NPM / pnpm compatible developer experience with:
-- pnpm-style global, content-addressable store to eliminate duplicate package data
-- Ultra-fast installs via parallel fetch + streaming extraction + link phase
+Provide an NPM-compatible developer experience with:
+- Global on-disk cache for fetched packages (keyed by name/version)
+- Ultra-fast installs via parallel fetch + streaming extraction + hardlink/copy
 - Deterministic, minimal lockfile format (`pacm.lockb`, binary) for reproducible builds
 - Strong integrity & (future) signature verification for supply‑chain security
 
@@ -14,7 +14,7 @@ Provide an NPM / pnpm compatible developer experience with:
 2. Determinism: identical inputs => identical node_modules & lockfile.
 3. Disk Efficiency: single global copy of each (package, version, integrity) tuple.
 4. Security: integrity hashing, path traversal defenses, sandboxed extraction.
-5. Transparency: simple, documented lockfile & store layout.
+5. Transparency: simple, documented lockfile & cache layout.
 6. Extensibility: modular resolver/fetcher/linker pipeline.
 
 ## High-Level Architecture
@@ -28,27 +28,22 @@ CLI (pacm)
   │    ├─ Registry API Client (npm registry REST)
   │    ├─ Tarball Fetcher (HTTP GET, streaming)
   │    └─ Integrity Validator (SHA512)
-  ├─ Global Store (content-addressable)
-  │    ├─ Path: %LOCALAPPDATA%/pacm/store/v1/<algo>/<hash>/package
-  │    └─ Metadata index (manifest cache, integrity map)
-  ├─ Linker
-  │    ├─ Builds virtual dependency graph
-  │    ├─ Creates node_modules structure via symlink / junction / hardlink
-  │    └─ Hoisting / de-duping strategy (minimal depth, preserve peer deps)
+  ├─ Global Cache (by name/version)
+  │    └─ Path: %LOCALAPPDATA%/pacm/cache/v1/pkgs/<name>/<version>/package
+  ├─ Installer
+  │    ├─ Copies from cache into project node_modules (prefers hardlinks)
+  │    └─ Flat layout for speed; future: minimal hoisting
   └─ Audit & Security (future)
 ```
 
-### Store Layout (proposed)
+### Cache Layout (current)
 ```
-<storeRoot>/v1/sha512/<first2>/<full-hash>/package/  (extracted files)
-<storeRoot>/v1/sha512/<first2>/<full-hash>/meta.json (metadata)
+<cacheRoot>/v1/pkgs/<name>/<version>/package/        (extracted files)
 ```
-`meta.json` contains name, version, integrity, engines, dependencies hash.
 
-### node_modules Linking Strategy
-- Prefer directory symlinks (Windows: junctions) to avoid copying.
-- Fallback to hardlinks when symlinks not permitted.
-- Deterministic path mapping: project/.pacm-maps.json (optional trace file).
+### node_modules Install Strategy
+- Prefer hardlinks for files; fallback to copy when not supported.
+- Fully materialize dependencies in local node_modules for runtime speed.
 
 ## Current Prototype Status
 | Feature | Status |
@@ -57,8 +52,8 @@ CLI (pacm)
 | package.json read/write | Basic (no scripts/fields beyond core) |
 | Lockfile write/read | Basic (flat list – no transitive tree yet) |
 | Add dependency (no network) | Placeholder only |
-| Global store | Not implemented |
-| Symlink/link phase | Not implemented |
+| Global cache | Implemented (name/version) |
+| Installer (hardlink/copy) | Implemented (flat copy) |
 | Semver parsing & resolution | Not implemented |
 | Registry fetching (npm) | Not implemented |
 | Integrity (SHA512) | Not implemented |
@@ -74,10 +69,10 @@ CLI (pacm)
 - Concrete version selection + dedupe
 - Streaming tarball extraction to temp + integrity hash during stream
 
-### Phase 2: Global Store & Linking
-- Content-addressable store keyed by integrity hash
-- Concurrency-safe acquisition (lock file / atomic rename)
-- Symlink / junction creation algorithm with hoisting policy
+### Phase 2: Cache & Installer
+- Global cache keyed by name/version
+- Concurrency-safe acquisition (atomic rename)
+- Super-fast installer using hardlinks/copy
 - Deterministic lockfile graph representation (list of packages + dependency edges)
 
 ### Phase 3: Dependency Classes & Scripts
@@ -89,7 +84,7 @@ CLI (pacm)
 - Parallel fetch with bounded worker pool
 - Incremental installs (only new / changed subgraph)
 - Lazy extraction (on-demand) experiment
-- Bloom / fast existence checks for store hits
+- Fast existence checks for cache hits
 
 ### Phase 5: Security & Trust
 - Integrity mandatory (SHA512)
@@ -165,8 +160,8 @@ CLI (pacm)
 - Memory: GeneralPurposeAllocator for now; move to custom arena pools per install session.
 - Error Handling: bubble with `try`; central command dispatcher reports and exits.
 - Concurrency (future): async/await tasks for fetch + extraction; use bounded channel.
-- Hashing: std.crypto.sha2 (streaming) -> hex / base64 encoding for integrity string.
-- Platform: Windows symlink policy -> use junctions for directories when necessary.
+- Hashing: sha2 (streaming) -> base64 encoding for integrity string.
+- Platform: prefer hardlinks; fallback to copy if not permitted.
 
 ## Contributing (Early Prototype)
 - Expect rapid schema changes.
@@ -178,7 +173,7 @@ CLI (pacm)
 cargo build --release
 target\release\pacm   # help
 target\release\pacm init
-target\release\pacm install lodash   # placeholder (no network yet)
+target\release\pacm install lodash
 ```
 
 ## Future Compatibility Goals
@@ -187,4 +182,4 @@ target\release\pacm install lodash   # placeholder (no network yet)
 - Optionally export pnpm-style lockfile for ecosystem tools.
 
 ---
-Status: PROTOTYPE – Not production ready.
+Status: PROTOTYPE – Fast cache-based installs; evolving.

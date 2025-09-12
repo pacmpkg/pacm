@@ -1,5 +1,4 @@
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
@@ -10,8 +9,6 @@ pub struct PackageInstance {
     pub version: String,
     /// dependency name -> range (for now) – we resolve to concrete version via instance map later
     pub dependencies: BTreeMap<String, String>,
-    /// hex hash of the stored package content (sha512 hex)
-    pub store_hex: String,
 }
 
 #[derive(Debug)]
@@ -30,201 +27,33 @@ impl Linker {
         &self,
         project_root: &Path,
         instances: &HashMap<String, PackageInstance>,
-        root_deps: &BTreeMap<String, String>,
+        _root_deps: &BTreeMap<String, String>,
     ) -> Result<()> {
         let node_modules = project_root.join("node_modules");
         fs::create_dir_all(&node_modules)?;
-        let virtual_root = node_modules.join(&self.virtual_dir_name);
-        fs::create_dir_all(&virtual_root)?;
 
+        // Install all packages flat into node_modules by copying from global cache
         for inst in instances.values() {
-            let inst_dir_name = format!("{}@{}", inst.name, inst.version);
-            let inst_dir = virtual_root.join(&inst_dir_name);
-            let pkg_parent = inst_dir.join("node_modules");
-            let mut pkg_dir = pkg_parent.clone();
+            let cache_pkg_dir = crate::store::cache_package_path(&inst.name, &inst.version);
+            let mut dest = node_modules.clone();
             for part in inst.name.split('/') {
-                pkg_dir = pkg_dir.join(part);
+                dest = dest.join(part);
             }
-            if let Some(parent) = pkg_dir.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let store_pkg_dir = crate::store::package_path(&inst.store_hex);
-            materialize_package_dir(&store_pkg_dir, &pkg_dir)?;
-        }
-
-        for inst in instances.values() {
-            let inst_dir_name = format!("{}@{}", inst.name, inst.version);
-            let inst_nm = virtual_root.join(&inst_dir_name).join("node_modules");
-            for dep_name in inst.dependencies.keys() {
-                if let Some(dep_inst) = instances.get(dep_name) {
-                    let dep_inst_dir_name = format!("{}@{}", dep_inst.name, dep_inst.version);
-                    let mut target_pkg_dir =
-                        virtual_root.join(&dep_inst_dir_name).join("node_modules");
-                    for part in dep_inst.name.split('/') {
-                        target_pkg_dir = target_pkg_dir.join(part);
-                    }
-                    // build link path inside the instance's node_modules, respecting scope segments
-                    let mut link_path = inst_nm.clone();
-                    for part in dep_name.split('/') {
-                        link_path = link_path.join(part);
-                    }
-                    if link_path.exists() {
-                        continue;
-                    }
-                    if let Some(p) = link_path.parent() {
-                        fs::create_dir_all(p)?;
-                    }
-                    symlink_dir_with_fallback(&target_pkg_dir, &link_path)?;
-                }
-            }
-        }
-
-        for dep_name in root_deps.keys() {
-            if let Some(inst) = instances.get(dep_name) {
-                let inst_dir_name = format!("{}@{}", inst.name, inst.version);
-                let mut target_pkg_dir = virtual_root.join(&inst_dir_name).join("node_modules");
-                for part in inst.name.split('/') {
-                    target_pkg_dir = target_pkg_dir.join(part);
-                }
-                let mut public_path = node_modules.clone();
-                for part in dep_name.split('/') {
-                    public_path = public_path.join(part);
-                }
-                if public_path.exists() {
-                    continue;
-                }
-                if let Some(p) = public_path.parent() {
-                    fs::create_dir_all(p)?;
-                }
-                symlink_dir_with_fallback(&target_pkg_dir, &public_path)?;
-            }
-        }
-
-        let global_virtual_nm = virtual_root.join("node_modules");
-        fs::create_dir_all(&global_virtual_nm)?;
-        for inst in instances.values() {
-            let inst_dir_name = format!("{}@{}", inst.name, inst.version);
-            let mut target_pkg_dir = virtual_root.join(&inst_dir_name).join("node_modules");
-            for part in inst.name.split('/') {
-                target_pkg_dir = target_pkg_dir.join(part);
-            }
-            let mut link_path = global_virtual_nm.clone();
-            for part in inst.name.split('/') {
-                link_path = link_path.join(part);
-            }
-            if link_path.exists() {
+            if dest.exists() {
                 continue;
             }
-            if let Some(p) = link_path.parent() {
-                fs::create_dir_all(p)?;
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
             }
-            symlink_dir_with_fallback(&target_pkg_dir, &link_path)?;
+            materialize_package_dir(&cache_pkg_dir, &dest)?;
         }
 
         Ok(())
     }
 }
 
-fn symlink_dir_with_fallback(from: &Path, to: &Path) -> Result<()> {
-    if to.exists() || std::fs::symlink_metadata(to).is_ok() {
-        return Ok(());
-    }
-    #[cfg(windows)]
-    {
-        static CAN_SYMLINK: Lazy<bool> = Lazy::new(|| {
-            use std::os::windows::fs::symlink_dir;
-            let tmp = std::env::temp_dir();
-            let test_src = tmp.join("pacm_symlink_test_src");
-            let test_dst = tmp.join("pacm_symlink_test_dst");
-            let _ = std::fs::create_dir_all(&test_src);
-            let res = symlink_dir(&test_src, &test_dst);
-            let ok = res.is_ok();
-            let _ = std::fs::remove_dir_all(&test_dst);
-            let _ = std::fs::remove_dir_all(&test_src);
-            ok
-        });
-        if !*CAN_SYMLINK {
-            // Directly copy without attempting symlink/junction to avoid repeated failures/noise.
-            copy_dir_recursive(from, to)?;
-            return Ok(());
-        }
-        if let Err(e) = symlink_dir_with_junction_fallback(from, to) {
-            if let Some(code) = e.raw_os_error() {
-                // 1314: privilege required (expected on non-admin); silently copy without warning.
-                // 5: access denied (treat similarly if copying succeeds).
-                if code == 1314 || code == 5 {
-                    copy_dir_recursive(from, to)?;
-                    return Ok(());
-                }
-            }
-            // Other errors may be due to races where the destination was created concurrently.
-            if to.exists() || std::fs::symlink_metadata(to).is_ok() {
-                return Ok(());
-            }
-            // Unexpected error: surface as warning then propagate (Windows only)
-            #[cfg(windows)]
-            {
-                crate::cli::record_warning(format!(
-                    "link fallback unexpected error for {:?}: {}",
-                    to, e
-                ));
-            }
-            return Err(e.into());
-        }
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        if let Err(_e) = symlink(from, to) {
-            copy_dir_recursive(from, to)?;
-        }
-        return Ok(());
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        copy_dir_recursive(from, to)?;
-        return Ok(());
-    }
-}
 
-#[cfg(windows)]
-fn symlink_dir_with_junction_fallback(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::symlink_dir;
-    match symlink_dir(from, to) {
-        Ok(_) => Ok(()),
-        Err(orig_err) => {
-            if let Some(1314) = orig_err.raw_os_error() {
-                // need admin, try junction
-                use std::process::{Command, Stdio};
-                let output = Command::new("cmd")
-                    .args([
-                        "/C",
-                        "mklink",
-                        "/J",
-                        to.to_str().unwrap(),
-                        from.to_str().unwrap(),
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .output()?;
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    if to.exists() || std::fs::symlink_metadata(to).is_ok() {
-                        Ok(())
-                    } else {
-                        Err(orig_err)
-                    }
-                }
-            } else {
-                Err(orig_err)
-            }
-        }
-    }
-}
-
-fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+pub fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     if !to.exists() {
         fs::create_dir_all(to)?;
     }
@@ -236,15 +65,21 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
         if meta.is_dir() {
             copy_dir_recursive(&p, &dst)?;
         } else {
-            std::fs::copy(&p, &dst)?;
+            // Prefer hard links to keep content de-duplicated and paths local to project
+            if let Err(_e) = std::fs::hard_link(&p, &dst) {
+                std::fs::copy(&p, &dst)?;
+            }
         }
     }
     Ok(())
 }
 
 fn materialize_package_dir(from: &Path, to: &Path) -> Result<()> {
-    if to.exists() {
+    if to.exists() || std::fs::symlink_metadata(to).is_ok() {
         return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
     }
     copy_dir_recursive(from, to)
 }

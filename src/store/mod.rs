@@ -1,4 +1,4 @@
-use crate::fsutil::store_root;
+use crate::fsutil::cache_root;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::read::GzDecoder;
@@ -7,43 +7,36 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tar::Archive;
+use semver::Version;
+use serde::Deserialize;
 
-pub fn package_dir(sha512_hex: &str) -> PathBuf {
-    let mut root = store_root();
-    root.push("sha512");
-    let (first2, _) = sha512_hex.split_at(2.min(sha512_hex.len()));
-    root.push(first2);
-    root.push(sha512_hex);
+fn cache_dir_for(name: &str, version: &str) -> PathBuf {
+    let mut root = cache_root();
+    root.push("pkgs");
+    // support scoped names like @scope/name
+    for part in name.split('/') {
+        root.push(part);
+    }
+    root.push(version);
     root
 }
 
-pub fn package_path(sha512_hex: &str) -> PathBuf {
-    let mut d = package_dir(sha512_hex);
+pub fn cache_package_path(name: &str, version: &str) -> PathBuf {
+    let mut d = cache_dir_for(name, version);
     d.push("package");
     d
 }
 
-pub fn exists_by_integrity(integrity: &str) -> Option<String> {
-    if !integrity.starts_with("sha512-") {
-        return None;
-    }
-    let b64 = &integrity[7..];
-    if let Ok(raw) = STANDARD.decode(b64) {
-        let hex = hex::encode(raw);
-        if package_path(&hex).exists() {
-            return Some(hex);
-        }
-        return Some(hex); // return hex anyway for potential path planning
-    }
-    None
-}
-
-pub fn ensure_package(bytes: &[u8], integrity_hint: Option<&str>) -> Result<(String, String)> {
-    // Hash bytes
+pub fn ensure_cached_package(
+    name: &str,
+    version: &str,
+    bytes: &[u8],
+    integrity_hint: Option<&str>,
+) -> Result<String> {
+    // Hash bytes for integrity reporting/verification only (not keying the cache)
     let mut hasher = Sha512::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    let computed_hex = hex::encode(&digest);
     let computed_integrity = format!("sha512-{}", STANDARD.encode(&digest));
     if let Some(integrity) = integrity_hint {
         if integrity.starts_with("sha512-") {
@@ -60,10 +53,10 @@ pub fn ensure_package(bytes: &[u8], integrity_hint: Option<&str>) -> Result<(Str
             }
         }
     }
-    let dir = package_dir(&computed_hex);
-    let marker = package_path(&computed_hex);
+    let dir = cache_dir_for(name, version);
+    let marker = cache_package_path(name, version);
     if marker.exists() {
-        return Ok((computed_hex, computed_integrity));
+        return Ok(integrity_hint.unwrap_or(&computed_integrity).to_string());
     }
     let tmp = dir.with_extension("tmp");
     fs::create_dir_all(&tmp)?;
@@ -82,12 +75,11 @@ pub fn ensure_package(bytes: &[u8], integrity_hint: Option<&str>) -> Result<(Str
             continue;
         }
         let comps: Vec<_> = path.components().collect();
-        let stripped: std::path::PathBuf =
-            if comps.len() > 1 && comps[0].as_os_str() == OsStr::new("package") {
-                comps[1..].iter().collect()
-            } else {
-                path.to_path_buf()
-            };
+        let stripped: std::path::PathBuf = if comps.len() > 1 && comps[0].as_os_str() == OsStr::new("package") {
+            comps[1..].iter().collect()
+        } else {
+            path.to_path_buf()
+        };
         if stripped.as_os_str().is_empty() {
             continue;
         }
@@ -117,39 +109,67 @@ pub fn ensure_package(bytes: &[u8], integrity_hint: Option<&str>) -> Result<(Str
     }
     fs::create_dir_all(dir.parent().unwrap())?;
     fs::rename(&tmp, &dir)?;
-    Ok((computed_hex, computed_integrity))
+    Ok(integrity_hint.unwrap_or(&computed_integrity).to_string())
 }
 
-pub fn link_into_project(store_pkg_dir: &Path, project_root: &Path, name: &str) -> Result<()> {
-    // Legacy helper now enforces symlink-only policy
+pub fn link_into_project(cache_pkg_dir: &Path, project_root: &Path, name: &str) -> Result<()> {
+    // Simple, fast copy into node_modules from global cache (with hardlinks fallback)
     let nm = project_root.join("node_modules");
     fs::create_dir_all(&nm)?;
-    let target = nm.join(name);
+    let mut target = nm.clone();
+    for part in name.split('/') {
+        target = target.join(part);
+    }
     if target.exists() {
         return Ok(());
     }
-    let legacy = store_pkg_dir.join("package");
-    let source = if legacy.exists() {
-        legacy
-    } else {
-        store_pkg_dir.to_path_buf()
-    };
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::symlink_dir;
-        symlink_dir(&source, &target)?;
-        return Ok(());
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        symlink(&source, &target)?;
-        return Ok(());
+    crate::linker::copy_dir_recursive(&cache_pkg_dir, &target)?;
+    Ok(())
+}
+
+/// Return all cached semantic versions for a given package, sorted descending.
+pub fn cached_versions(name: &str) -> Vec<Version> {
+    let mut root = cache_root();
+    root.push("pkgs");
+    for part in name.split('/') {
+        root.push(part);
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        // Minimal fallback: create directory with shallow symlinked (copied) files
-        copy_dir::copy_dir(&source, &target)?;
-        return Ok(());
+    let mut out: Vec<Version> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&root) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                if let Some(ver_str) = p.file_name().and_then(|o| o.to_str()) {
+                    if let Ok(v) = Version::parse(ver_str) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
     }
+    out.sort_by(|a, b| b.cmp(a));
+    out
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CachedManifest {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub version: Option<String>,
+    #[serde(default)]
+    pub dependencies: std::collections::BTreeMap<String, String>,
+}
+
+/// Read the cached package.json for a cached package, returning minimal fields.
+pub fn read_cached_manifest(name: &str, version: &str) -> Result<CachedManifest> {
+    let mut p = cache_package_path(name, version);
+    p.push("package.json");
+    let txt = fs::read_to_string(&p)
+        .with_context(|| format!("read cached package.json at {}", p.display()))?;
+    let mf: CachedManifest = serde_json::from_str(&txt)
+        .with_context(|| format!("parse cached package.json at {}", p.display()))?;
+    Ok(mf)
 }

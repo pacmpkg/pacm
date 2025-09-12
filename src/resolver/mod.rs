@@ -44,7 +44,7 @@ pub fn map_versions(meta: &crate::fetch::NpmMetadata) -> BTreeMap<Version, Strin
     map
 }
 
-fn canonicalize_npm_range(input: &str) -> String {
+pub fn canonicalize_npm_range(input: &str) -> String {
     let s = input.trim();
     if s.is_empty() || s == "*" || s == "latest" {
         return "*".into();

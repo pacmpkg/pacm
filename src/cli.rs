@@ -1,14 +1,12 @@
 use crate::colors::*;
 use crate::fetch::Fetcher;
-use crate::linker::{Linker, PackageInstance};
+use crate::installer::{Installer, PackageInstance};
 use crate::lockfile::{self, Lockfile, PackageEntry};
 use crate::manifest::{self, Manifest};
 use crate::resolver::{map_versions, Resolver};
-use crate::store;
 use anyhow::Context;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use once_cell::sync::Lazy;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -21,7 +19,8 @@ use std::time::Instant;
 #[command(
     name = "pacm",
     version,
-    about = "Prototype JavaScript package manager (Rust)"
+    about = "Fast, cache-first JavaScript/TypeScript package manager",
+    long_about = "pacm — a blazing fast, cache-first package manager.\n\nExamples:\n  pacm init --name my-app\n  pacm install\n  pacm add axios\n  pacm cache path\n  pacm cache clean"
 )]
 pub struct PacmCli {
     #[command(subcommand)]
@@ -37,7 +36,12 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Install all deps or add specific packages (placeholder network)
+    /// Remove one or more dependencies
+    Remove {
+        /// Packages to remove (by name)
+        packages: Vec<String>,
+    },
+    /// Install all deps or add specific packages
     Install {
         /// Packages to add (name[@range])
         packages: Vec<String>,
@@ -53,6 +57,12 @@ pub enum Commands {
         /// Install exact version (no range coercion)
         #[arg(long)]
         exact: bool,
+        /// Do not hit the network; fail if package/version is missing in cache
+        #[arg(long)]
+        prefer_offline: bool,
+        /// Disable progress rendering
+        #[arg(long)]
+        no_progress: bool,
     },
     /// Add a dependency (alias for install <pkg>)
     Add {
@@ -73,6 +83,41 @@ pub enum Commands {
     },
     /// List packages from lockfile
     List,
+    /// Manage the global cache
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCmd,
+    },
+    /// Package manager utilities (similar to npm/pnpm/bun pm)
+    Pm {
+        #[command(subcommand)]
+        cmd: PmCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheCmd {
+    /// Show the cache path on this machine
+    Path,
+    /// Clean the cache (remove all cached packages)
+    Clean,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PmCmd {
+    /// Export the lockfile in human-readable form
+    Lockfile {
+        /// Output format: json or yaml
+        #[arg(long, short = 'f', default_value = "json")]
+        format: String,
+        /// Save to a file in the current directory instead of only printing
+        #[arg(long, short = 's')]
+        save: bool,
+    },
+    /// Prune transitive dependencies no longer referenced by roots
+    Prune,
+    /// List lockfile entries (alias of list)
+    Ls,
 }
 
 impl PacmCli {
@@ -93,21 +138,49 @@ impl PacmCli {
                 optional,
                 no_save,
                 exact,
-            }) => cmd_install(packages.clone(), *dev, *optional, *no_save, *exact),
+                prefer_offline,
+                no_progress,
+            }) => cmd_install(
+                packages.clone(),
+                *dev,
+                *optional,
+                *no_save,
+                *exact,
+                *prefer_offline,
+                *no_progress,
+            ),
             Some(Commands::Add {
                 package,
                 dev,
                 optional,
                 no_save,
                 exact,
-            }) => cmd_install(vec![package.clone()], *dev, *optional, *no_save, *exact),
+            }) => cmd_install(
+                vec![package.clone()],
+                *dev,
+                *optional,
+                *no_save,
+                *exact,
+                false,
+                false,
+            ),
+            Some(Commands::Remove { packages }) => cmd_remove(packages.clone()),
             Some(Commands::List) => cmd_list(),
+            Some(Commands::Cache { cmd }) => match cmd {
+                CacheCmd::Path => cmd_cache_path(),
+                CacheCmd::Clean => cmd_cache_clean(),
+            },
+            Some(Commands::Pm { cmd }) => match cmd {
+                PmCmd::Lockfile { format, save } => cmd_pm_lockfile(format.clone(), *save),
+                PmCmd::Prune => cmd_pm_prune(),
+                PmCmd::Ls => cmd_list(),
+            },
         }
     }
 
     fn print_help(&self) {
-        println!("pacm - prototype package manager (Rust)\n");
-        println!("Commands:\n  init\n  install [pkg..]\n  add <pkg>\n  list");
+    println!("pacm - Fast, cache-first package manager\n");
+    println!("Commands:\n  init [--name --version]\n  install [pkg..] [--dev|--optional] [--no-save] [--prefer-offline] [--no-progress]\n  add <pkg> [--dev|--optional] [--no-save]\n  remove <pkg..>\n  list\n  cache <path|clean>\n  pm <lockfile|prune|ls> [options]");
     }
 }
 
@@ -145,40 +218,7 @@ impl ProgressRenderer {
     }
 }
 
-static PROGRESS_HANDLE: Lazy<Mutex<Option<Arc<Mutex<ProgressRenderer>>>>> =
-    Lazy::new(|| Mutex::new(None));
-
-pub(crate) fn set_progress_handle(h: Arc<Mutex<ProgressRenderer>>) {
-    *PROGRESS_HANDLE.lock().unwrap() = Some(h);
-}
-pub(crate) fn clear_progress_handle() {
-    *PROGRESS_HANDLE.lock().unwrap() = None;
-}
-
-pub(crate) fn record_warning(msg: impl Into<String>) {
-    let msg = msg.into();
-    let handle_opt = PROGRESS_HANDLE.lock().unwrap().clone();
-    if let Some(h) = handle_opt {
-        // Print warning on its own line, then re-render status
-        let r = h.lock().unwrap();
-        print!(
-            "\r\n{gray}[pacm]{reset} {yellow}warning{reset}: {msg}\n",
-            gray = C_GRAY,
-            reset = C_RESET,
-            yellow = C_YELLOW,
-            msg = msg
-        );
-        let pad = if r.last_len > r.last_status.len() {
-            r.last_len - r.last_status.len()
-        } else {
-            0
-        };
-        print!("{}{}", r.last_status, " ".repeat(pad));
-        io::stdout().flush().ok();
-    } else {
-        eprintln!("[pacm] warning: {}", msg);
-    }
-}
+// Progress handle helpers removed in cache-first refactor.
 
 fn render_status(pr: &mut ProgressRenderer, raw: impl Into<String>) {
     let raw = raw.into();
@@ -226,6 +266,7 @@ struct DownloadProgress {
     downloaded: u64,
     total: Option<u64>,
     done: bool,
+    started_at: Instant,
 }
 
 fn human_size(bytes: u64) -> String {
@@ -249,6 +290,8 @@ fn cmd_install(
     optional: bool,
     no_save: bool,
     _exact: bool,
+    prefer_offline: bool,
+    no_progress: bool,
 ) -> Result<()> {
     let manifest_path = PathBuf::from("package.json");
     if !manifest_path.exists() {
@@ -261,9 +304,9 @@ fn cmd_install(
         return Ok(());
     }
     let mut manifest = manifest::load(&manifest_path)?;
-    // If user provided package specs on the command line, resolve versions and optionally persist
+    // If user provided package specs on the command line, resolve/persist only those names
     if !specs.is_empty() {
-        // We'll resolve any provided specs to concrete versions (using latest dist-tag when no range specified)
+        // Resolve provided specs to concrete versions for package.json (if not --no-save)
         for spec in &specs {
             // Parse package spec allowing scoped names. Strategy:
             // - If spec contains '@' but starts with '@' (scoped) we look for the last '@' to split version, e.g. @scope/name@1.2.3
@@ -293,24 +336,35 @@ fn cmd_install(
                 }
             };
 
-            // If no-save is false, we will write the resolved version into package.json; otherwise only resolve and install
-            let resolved_version = if req == "*" {
-                // fetch metadata to get dist-tags.latest
-                let fetcher = Fetcher::new(None)?;
-                let meta = fetcher
-                    .package_metadata(&name)
-                    .with_context(|| format!("fetch metadata for {}", name))?;
-                if let Some(tags) = &meta.dist_tags {
-                    if let Some(latest) = &tags.latest {
-                        latest.clone()
-                    } else {
-                        "*".to_string()
-                    }
+            // If no-save is false, resolve a concrete version (prefer cache) to persist; otherwise just keep the range
+            let resolved_version = if no_save { req.clone() } else {
+                // Prefer cache: find highest cached version satisfying the req (or latest if '*')
+                let req_str = req.as_str();
+                let candidates = crate::cache::cached_versions(&name);
+                let maybe_cached_pick = if req_str == "*" {
+                    candidates.first().cloned()
                 } else {
-                    "*".to_string()
+                    let _keep = crate::resolver::map_versions; // keep import referenced
+                    let canon = crate::resolver::canonicalize_npm_range(req_str);
+                    let parsed = semver::VersionReq::parse(&canon).ok();
+                    if let Some(rq) = parsed {
+                        candidates.into_iter().find(|v| rq.matches(v))
+                    } else { None }
+                };
+                if let Some(v) = maybe_cached_pick { v.to_string() } else {
+                    // fallback to registry latest/tag range without resolving full workspace
+                    let fetcher = Fetcher::new(None)?;
+                    let meta = fetcher
+                        .package_metadata(&name)
+                        .with_context(|| format!("fetch metadata for {}", name))?;
+                    if req == "*" || req.eq_ignore_ascii_case("latest") {
+                        if let Some(tags) = &meta.dist_tags {
+                            if let Some(ver) = tags.get("latest") { ver.clone() } else { req.clone() }
+                        } else { req.clone() }
+                    } else if let Some(tags) = &meta.dist_tags {
+                        if let Some(ver) = tags.get(&req) { ver.clone() } else { req.clone() }
+                    } else { req.clone() }
                 }
-            } else {
-                req.clone()
             };
 
             if !no_save {
@@ -348,7 +402,13 @@ fn cmd_install(
     let old_root_deps: std::collections::BTreeMap<String, String> = original_lock
         .packages
         .get("")
-        .map(|p| p.dependencies.clone())
+        .map(|p| {
+            let mut m = BTreeMap::new();
+            m.extend(p.dependencies.clone());
+            m.extend(p.dev_dependencies.clone());
+            m.extend(p.optional_dependencies.clone());
+            m
+        })
         .unwrap_or_default();
 
     // Sync lock root + placeholder entries for new deps
@@ -356,7 +416,13 @@ fn cmd_install(
     let new_root_deps: std::collections::BTreeMap<String, String> = lock
         .packages
         .get("")
-        .map(|p| p.dependencies.clone())
+        .map(|p| {
+            let mut m = BTreeMap::new();
+            m.extend(p.dependencies.clone());
+            m.extend(p.dev_dependencies.clone());
+            m.extend(p.optional_dependencies.clone());
+            m
+        })
         .unwrap_or_default();
 
     // Determine added / removed top-level dependencies (by name)
@@ -403,7 +469,10 @@ fn cmd_install(
                     prune_removed_from_lock(&mut lock, &removed_root);
                     remove_dirs(&removed_root);
                     // Also drop any unreachable stale lock entries (after removal)
-                    prune_unreachable(&mut lock, &instances);
+                    let trans_removed = prune_unreachable(&mut lock, &instances);
+                    if !trans_removed.is_empty() {
+                        remove_dirs(&trans_removed);
+                    }
                 }
                 let start = Instant::now();
                 let mut merged_root_deps: BTreeMap<String, String> = BTreeMap::new();
@@ -418,7 +487,6 @@ fn cmd_install(
                 }
                 // Setup progress renderer so warnings appear above status
                 let progress = Arc::new(Mutex::new(ProgressRenderer::new()));
-                set_progress_handle(progress.clone());
                 {
                     let mut pr = progress.lock().unwrap();
                     render_status(
@@ -426,18 +494,22 @@ fn cmd_install(
                         format_status("fast", "link: using cached store; skipping resolution"),
                     );
                 }
-                let linker = Linker::new();
+                let installer = Installer::new();
                 let as_hash: std::collections::HashMap<String, PackageInstance> =
                     instances.into_iter().collect();
-                linker.link_project(&std::env::current_dir()?, &as_hash, &merged_root_deps)?;
+                installer.install(&std::env::current_dir()?, &as_hash, &merged_root_deps)?;
                 // Finish status line
                 {
                     let mut pr = progress.lock().unwrap();
                     finish_progress(&mut pr);
                 }
-                clear_progress_handle();
-                // Write updated (pruned) lockfile
+                // progress handle helpers removed
+                // Write updated (pruned) lockfile and cleanup if now empty
                 lockfile::write(&lock, lock_path.clone())?;
+                if lockfile_has_no_packages(&lock) {
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                cleanup_empty_node_modules_dir();
                 let dur = start.elapsed();
                 // Summary lines
                 if added_root.is_empty() && removed_root.is_empty() {
@@ -487,7 +559,7 @@ fn cmd_install(
         }
     }
 
-    // Proceed with full resolution path
+    // Proceed with resolution path; if specs provided, limit to those packages only
     let fetcher = Fetcher::new(None)?;
     let resolver = Resolver::new();
     #[derive(Clone)]
@@ -496,23 +568,26 @@ fn cmd_install(
         range: String,
     }
     let mut queue: VecDeque<Task> = VecDeque::new();
-    for (n, r) in &manifest.dependencies {
-        queue.push_back(Task {
-            name: n.clone(),
-            range: r.clone(),
-        });
-    }
-    for (n, r) in &manifest.dev_dependencies {
-        queue.push_back(Task {
-            name: n.clone(),
-            range: r.clone(),
-        });
-    }
-    for (n, r) in &manifest.optional_dependencies {
-        queue.push_back(Task {
-            name: n.clone(),
-            range: r.clone(),
-        });
+    if specs.is_empty() {
+        for (n, r) in &manifest.dependencies {
+            queue.push_back(Task { name: n.clone(), range: r.clone() });
+        }
+        for (n, r) in &manifest.dev_dependencies {
+            queue.push_back(Task { name: n.clone(), range: r.clone() });
+        }
+        for (n, r) in &manifest.optional_dependencies {
+            queue.push_back(Task { name: n.clone(), range: r.clone() });
+        }
+    } else {
+        // Seed only the provided specs
+        for spec in &specs {
+            let (name, req) = if spec.starts_with('@') {
+                if let Some(idx) = spec.rfind('@') { if idx == 0 { (spec.to_string(), "*".to_string()) } else { let (n, r) = spec.split_at(idx); (n.to_string(), r[1..].to_string()) } } else { (spec.to_string(), "*".to_string()) }
+            } else {
+                if let Some((n, r)) = spec.split_once('@') { (n.to_string(), if r.is_empty() { "*".to_string() } else { r.to_string() }) } else { (spec.to_string(), "*".to_string()) }
+            };
+            queue.push_back(Task { name, range: req });
+        }
     }
     let mut visited_name_version: HashSet<(String, String)> = HashSet::new();
 
@@ -520,40 +595,70 @@ fn cmd_install(
     let mut installed_count = 0usize;
     use std::sync::atomic::{AtomicBool, Ordering};
     let progress = Arc::new(Mutex::new(ProgressRenderer::new()));
-    set_progress_handle(progress.clone());
+    // progress handle helpers removed
     let downloads: Arc<Mutex<Vec<DownloadProgress>>> = Arc::new(Mutex::new(Vec::new()));
     let progress_clone = progress.clone();
     let downloads_clone = downloads.clone();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_thread = stop_flag.clone();
 
-    let painter = thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(100));
-        let mut pr = progress_clone.lock().unwrap();
-        let dl = downloads_clone.lock().unwrap();
-        let mut active_lines = Vec::new();
-        for d in dl.iter() {
-            if !d.done {
-                active_lines.push(format!(
-                    "{}@{} {} / {}",
-                    d.name,
-                    d.version,
-                    human_size(d.downloaded),
-                    d.total.map(human_size).unwrap_or_else(|| "?".into())
-                ));
+    let painter = if no_progress {
+        None
+    } else {
+        Some(thread::spawn(move || {
+            let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]; // braille spinner
+            let mut tick: usize = 0;
+            loop {
+                thread::sleep(Duration::from_millis(100));
+                let mut pr = progress_clone.lock().unwrap();
+                let dl = downloads_clone.lock().unwrap();
+                let mut active_lines = Vec::new();
+                for d in dl.iter() {
+                    if d.done { continue; }
+                    let frame = spinner_frames[tick % spinner_frames.len()];
+                    let total = d.total.unwrap_or(0);
+                    let pct = if total > 0 { (d.downloaded as f64 / total as f64) * 100.0 } else { 0.0 };
+                    let bar = if total > 0 {
+                        let width = 18usize;
+                        let filled = ((d.downloaded as f64 / total as f64) * width as f64) as usize;
+                        let mut s = String::new();
+                        s.push('[');
+                        s.push_str(&"#".repeat(filled.min(width)));
+                        s.push_str(&"-".repeat(width.saturating_sub(filled)));
+                        s.push(']');
+                        s
+                    } else {
+                        "[.................]".to_string()
+                    };
+                    let elapsed = d.started_at.elapsed().as_secs_f64();
+                    let speed = if elapsed > 0.0 { d.downloaded as f64 / elapsed } else { 0.0 };
+                    let eta = if total > 0 && speed > 0.0 {
+                        let remain = (total.saturating_sub(d.downloaded)) as f64 / speed;
+                        format!("{:.1}s", remain)
+                    } else { "?s".to_string() };
+                    active_lines.push(format!(
+                        "{frame} {name}@{ver} {bar} {pct:.0}% {done}/{total} {spd}/s ETA {eta}",
+                        frame=frame,
+                        name=d.name,
+                        ver=d.version,
+                        bar=bar,
+                        pct=pct,
+                        done=human_size(d.downloaded),
+                        total=if total>0 { human_size(total) } else { "?".into() },
+                        spd=human_size(speed as u64),
+                        eta=eta
+                    ));
+                }
+                tick = tick.wrapping_add(1);
+                if active_lines.is_empty() {
+                    if stop_flag_thread.load(Ordering::SeqCst) { break; }
+                    continue;
+                }
+                render_status(&mut pr, active_lines.join(" | "));
+                if dl.iter().all(|d| d.done) && stop_flag_thread.load(Ordering::SeqCst) { break; }
             }
-        }
-        if active_lines.is_empty() {
-            if stop_flag_thread.load(Ordering::SeqCst) {
-                break;
-            }
-            continue;
-        }
-        render_status(&mut pr, active_lines.join(" | "));
-        if dl.iter().all(|d| d.done) && stop_flag_thread.load(Ordering::SeqCst) {
-            break;
-        }
-    });
+        }))
+    };
 
     let mut instances: BTreeMap<String, PackageInstance> = BTreeMap::new();
 
@@ -561,119 +666,147 @@ fn cmd_install(
         if visited_name_version.iter().any(|(n, _)| n == &name) {
             continue;
         }
-        {
+        if !no_progress {
             let mut pr = progress.lock().unwrap();
             render_status(
                 &mut pr,
                 format_status("resolving", &format!("{}@{}", name, range)),
             );
         }
-        let meta = fetcher
-            .package_metadata(&name)
-            .with_context(|| format!("fetch metadata for {}", name))?;
-        let version_map = map_versions(&meta);
-        let (picked_ver, tarball_url) = resolver.pick_version(&version_map, &range)?;
+        // Cache-first pick: try cached versions satisfying the range, with dist-tag support
+        let (picked_ver, tarball_url) = {
+            let cached = crate::cache::cached_versions(&name);
+            let canon = crate::resolver::canonicalize_npm_range(&range);
+            let parsed_req = semver::VersionReq::parse(&canon).ok();
+            let is_tag_spec = parsed_req.is_none() && canon != "*" && !range.eq_ignore_ascii_case("latest");
+            if is_tag_spec {
+                if prefer_offline {
+                    bail!("cannot resolve dist-tag '{}' for {} offline", range, name);
+                }
+                // Force registry fetch to resolve tag
+                let meta = fetcher
+                    .package_metadata(&name)
+                    .with_context(|| format!("fetch metadata for {}", name))?;
+                if let Some(tags) = &meta.dist_tags {
+                    if let Some(ver_s) = tags.get(&range) {
+                        let ver = semver::Version::parse(ver_s)
+                            .with_context(|| format!("invalid version '{}' for tag '{}'", ver_s, range))?;
+                        let tar = meta
+                            .versions
+                            .get(ver_s)
+                            .map(|v| v.dist.tarball.clone())
+                            .unwrap_or_default();
+                        (ver, tar)
+                    } else {
+                        bail!("unknown dist-tag '{}' for {}", range, name);
+                    }
+                } else {
+                    bail!("no dist-tags available for {}", name);
+                }
+            } else {
+                let req = if canon == "*" { semver::VersionReq::STAR } else { parsed_req.unwrap_or(semver::VersionReq::STAR) };
+                if let Some(v) = cached.into_iter().find(|v| req.matches(v)) {
+                    let pv = v.clone();
+                    (pv.clone(), String::new())
+                } else {
+                    let meta = fetcher
+                        .package_metadata(&name)
+                        .with_context(|| format!("fetch metadata for {}", name))?;
+                    // If user asked for 'latest', honor dist-tag directly
+                    if range.eq_ignore_ascii_case("latest") {
+                        if let Some(tags) = &meta.dist_tags {
+                            if let Some(ver_s) = tags.get("latest") {
+                                let ver = semver::Version::parse(ver_s)?;
+                                let tar = meta
+                                    .versions
+                                    .get(ver_s)
+                                    .map(|v| v.dist.tarball.clone())
+                                    .unwrap_or_default();
+                                (ver, tar)
+                            } else {
+                                let version_map = map_versions(&meta);
+                                resolver.pick_version(&version_map, "*")?
+                            }
+                        } else {
+                            let version_map = map_versions(&meta);
+                            resolver.pick_version(&version_map, "*")?
+                        }
+                    } else {
+                        let version_map = map_versions(&meta);
+                        resolver.pick_version(&version_map, &range)?
+                    }
+                }
+            }
+        };
         if visited_name_version.contains(&(name.clone(), picked_ver.to_string())) {
             continue;
         }
-        let version_meta = meta
-            .versions
-            .get(&picked_ver.to_string())
-            .expect("version meta");
-        let integrity_hint = version_meta.dist.integrity.as_deref();
+        // If we picked from cache, load manifest from cache; otherwise use registry metadata
+        let (integrity_owned, dep_map, resolved_url): (Option<String>, BTreeMap<String, String>, Option<String>) = if tarball_url.is_empty() {
+            let cached_mf = crate::cache::read_cached_manifest(&name, &picked_ver.to_string())?;
+            (None, cached_mf.dependencies.into_iter().collect(), None)
+        } else {
+            let meta2 = fetcher
+                .package_metadata(&name)
+                .with_context(|| format!("fetch metadata for {}", name))?;
+            let version_meta = meta2
+                .versions
+                .get(&picked_ver.to_string())
+                .expect("version meta");
+            let integrity_owned = version_meta.dist.integrity.clone();
+            let mut dm = BTreeMap::new();
+            for (dn, dr) in &version_meta.dependencies { dm.insert(dn.clone(), dr.clone()); }
+            (integrity_owned, dm, Some(version_meta.dist.tarball.clone()))
+        };
         let mut reused = false;
-        let (hex, integrity) = if let Some(int_hint) = integrity_hint {
-            if let Some(existing_hex) = store::exists_by_integrity(int_hint) {
-                if store::package_path(&existing_hex).exists() {
-                    reused = true;
-                    (existing_hex, int_hint.to_string())
-                } else {
-                    {
-                        let mut pr = progress.lock().unwrap();
-                        render_status(
-                            &mut pr,
-                            format_status("downloading", &format!("{}@{}", name, picked_ver)),
-                        );
-                    }
-                    let bytes = perform_download(
-                        &fetcher,
-                        &name,
-                        &picked_ver.to_string(),
-                        &tarball_url,
-                        &downloads,
-                    )?;
-                    {
-                        let mut pr = progress.lock().unwrap();
-                        render_status(
-                            &mut pr,
-                            format_status("extracting", &format!("{}@{}", name, picked_ver)),
-                        );
-                    }
-                    store::ensure_package(&bytes, Some(int_hint))?
-                }
-            } else {
-                {
+        let cached = crate::cache::cache_package_path(&name, &picked_ver.to_string()).exists();
+        let integrity = if cached {
+            reused = true;
+            integrity_owned.as_deref().unwrap_or("").to_string()
+        } else {
+            if prefer_offline {
+                bail!("{name}@{ver} not in cache and --prefer-offline is set", name=name, ver=picked_ver);
+            }
+            {
+                if !no_progress {
                     let mut pr = progress.lock().unwrap();
                     render_status(
                         &mut pr,
                         format_status("downloading", &format!("{}@{}", name, picked_ver)),
                     );
                 }
-                let bytes = perform_download(
-                    &fetcher,
-                    &name,
-                    &picked_ver.to_string(),
-                    &tarball_url,
-                    &downloads,
-                )?;
-                {
+            }
+            let url = resolved_url
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| tarball_url.clone());
+            let bytes = perform_download(&fetcher, &name, &picked_ver.to_string(), &url, &downloads)?;
+            {
+                if !no_progress {
                     let mut pr = progress.lock().unwrap();
                     render_status(
                         &mut pr,
                         format_status("extracting", &format!("{}@{}", name, picked_ver)),
                     );
                 }
-                store::ensure_package(&bytes, Some(int_hint))?
             }
-        } else {
-            {
-                let mut pr = progress.lock().unwrap();
-                render_status(
-                    &mut pr,
-                    format_status("downloading", &format!("{}@{}", name, picked_ver)),
-                );
-            }
-            let bytes = perform_download(
-                &fetcher,
-                &name,
-                &picked_ver.to_string(),
-                &tarball_url,
-                &downloads,
-            )?;
-            {
-                let mut pr = progress.lock().unwrap();
-                render_status(
-                    &mut pr,
-                    format_status("extracting", &format!("{}@{}", name, picked_ver)),
-                );
-            }
-            store::ensure_package(&bytes, None)?
+            crate::cache::ensure_cached_package(&name, &picked_ver.to_string(), &bytes, integrity_owned.as_deref())?
         };
         // Defer linking – build instance map
         let key = format!("node_modules/{}", name);
-        let mut dep_map: BTreeMap<String, String> = BTreeMap::new();
-        for (dn, dr) in &version_meta.dependencies {
-            dep_map.insert(dn.clone(), dr.clone());
-        }
         let entry = lock.packages.entry(key).or_insert(PackageEntry {
             version: None,
             integrity: None,
             resolved: None,
             dependencies: Default::default(),
+            dev_dependencies: Default::default(),
+            optional_dependencies: Default::default(),
+            peer_dependencies: Default::default(),
         });
         entry.version = Some(picked_ver.to_string());
-        entry.integrity = Some(integrity);
-        entry.resolved = Some(tarball_url);
+        if !integrity.is_empty() { entry.integrity = Some(integrity.clone()); }
+        let resolved_for_lock = resolved_url.clone().or_else(|| if !tarball_url.is_empty() { Some(tarball_url.clone()) } else { None });
+        entry.resolved = resolved_for_lock;
         entry.dependencies = dep_map.clone();
         instances.insert(
             name.clone(),
@@ -681,7 +814,6 @@ fn cmd_install(
                 name: name.clone(),
                 version: picked_ver.to_string(),
                 dependencies: dep_map.clone(),
-                store_hex: hex.clone(),
             },
         );
         visited_name_version.insert((name.clone(), picked_ver.to_string()));
@@ -696,7 +828,7 @@ fn cmd_install(
         }
     }
     // Before linking phase: clear dynamic line so upcoming warnings stack above future linking status
-    {
+    if !no_progress {
         let mut pr = progress.lock().unwrap();
         if pr.last_len > 0 {
             print!("\r{}\r", " ".repeat(pr.last_len));
@@ -705,10 +837,15 @@ fn cmd_install(
         pr.last_status.clear();
         pr.last_len = 0;
     }
-    // Before linking: prune unreachable entries (we have full graph in instances)
-    prune_unreachable(&mut lock, &instances);
+    // Before linking: prune unreachable entries only when doing a full install
+    if specs.is_empty() {
+        let trans_removed = prune_unreachable(&mut lock, &instances);
+        if !trans_removed.is_empty() {
+            remove_dirs(&trans_removed);
+        }
+    }
     // Perform linking phase (virtual store + facade)
-    let linker = Linker::new();
+    let installer = Installer::new();
     // root_deps should include dependencies, devDependencies and optionalDependencies so added dev/optional packages are linked
     let mut merged_root_deps: BTreeMap<String, String> = BTreeMap::new();
     for (n, r) in &manifest.dependencies {
@@ -720,27 +857,32 @@ fn cmd_install(
     for (n, r) in &manifest.optional_dependencies {
         merged_root_deps.insert(n.clone(), r.clone());
     }
+    // peers are not installed directly but we do include them in the lockfile root; skip for linking
     let total_packages_for_summary = instances.len();
     let instances_for_link: std::collections::HashMap<String, PackageInstance> =
         instances.clone().into_iter().collect();
-    linker.link_project(
+    installer.install(
         &std::env::current_dir()?,
         &instances_for_link,
         &merged_root_deps,
     )?;
     lockfile::write(&lock, lock_path.clone())?;
+    if lockfile_has_no_packages(&lock) {
+        let _ = std::fs::remove_file(&lock_path);
+    }
+    cleanup_empty_node_modules_dir();
     let dur = start.elapsed();
     // Move to new line before summary
     // Ensure painter terminates (if active). Give it a moment.
     // Mark painter stop (downloads finished) and show final linking status once *after* warnings.
     stop_flag.store(true, Ordering::SeqCst);
-    {
+    if let Some(p) = painter { p.join().ok(); }
+    if !no_progress {
         let mut pr = progress.lock().unwrap();
         render_status(&mut pr, format_status("linking", "graph"));
         finish_progress(&mut pr);
     }
-    painter.join().ok();
-    clear_progress_handle();
+    // progress handle helpers removed
     // Compute summary data
     let total = total_packages_for_summary;
     let reused = total.saturating_sub(installed_count);
@@ -810,6 +952,194 @@ fn cmd_install(
     Ok(())
 }
 
+fn cmd_cache_path() -> Result<()> {
+    let p = crate::fsutil::cache_root();
+    println!("{gray}[pacm]{reset} cache: {p}", gray=C_GRAY, reset=C_RESET, p=p.display());
+    Ok(())
+}
+
+fn cmd_cache_clean() -> Result<()> {
+    use std::fs;
+    let root = crate::fsutil::cache_root();
+    if root.exists() {
+        fs::remove_dir_all(&root).ok();
+    }
+    fs::create_dir_all(&root)?;
+    println!("{gray}[pacm]{reset} {green}cache cleaned{reset} at {p}", gray=C_GRAY, green=C_GREEN, reset=C_RESET, p=root.display());
+    Ok(())
+}
+
+fn cmd_pm_lockfile(format: String, save: bool) -> Result<()> {
+    let lock_path = PathBuf::from("pacm.lockb");
+    let lock = if lock_path.exists() {
+        lockfile::load(&lock_path)?
+    } else {
+        let legacy = PathBuf::from("pacm-lock.json");
+        if legacy.exists() {
+            lockfile::load_json_compat(&legacy)?
+        } else {
+            bail!("no lockfile found (pacm.lockb or pacm-lock.json)");
+        }
+    };
+    let fmt = format.to_ascii_lowercase();
+    let (out, ext) = match fmt.as_str() {
+        "json" => {
+            (serde_json::to_string_pretty(&lock)?, "json")
+        }
+        "yaml" | "yml" => {
+            (serde_yaml::to_string(&lock)?, "yaml")
+        }
+        other => {
+            bail!("unsupported format '{}', use 'json' or 'yaml'", other);
+        }
+    };
+    if save {
+        let file = format!("pacm-lock.readable.{ext}");
+        std::fs::write(&file, &out)?;
+        println!(
+            "{gray}[pacm]{reset} wrote {file}",
+            gray = C_GRAY,
+            reset = C_RESET,
+            file = file
+        );
+    } else {
+        println!("{}", out);
+    }
+    Ok(())
+}
+
+fn cmd_pm_prune() -> Result<()> {
+    let manifest_path = PathBuf::from("package.json");
+    if !manifest_path.exists() {
+        bail!("no package.json found");
+    }
+    let manifest = manifest::load(&manifest_path)?;
+    let lock_path = PathBuf::from("pacm.lockb");
+    let mut lock = if lock_path.exists() {
+        lockfile::load(&lock_path)?
+    } else {
+        bail!("no lockfile found to prune");
+    };
+    if let Some(instances) = build_fast_instances(&manifest, &lock) {
+        let removed = prune_unreachable(&mut lock, &instances);
+        if !removed.is_empty() {
+            remove_dirs(&removed);
+            lockfile::write(&lock, lock_path.clone())?;
+            if lockfile_has_no_packages(&lock) {
+                let _ = std::fs::remove_file(&lock_path);
+            }
+            cleanup_empty_node_modules_dir();
+            println!(
+                "{gray}[pacm]{reset} pruned {count} unreachable packages",
+                gray = C_GRAY,
+                reset = C_RESET,
+                count = removed.len()
+            );
+        } else {
+            println!("{gray}[pacm]{reset} nothing to prune", gray = C_GRAY, reset = C_RESET);
+        }
+    } else {
+        println!(
+            "{gray}[pacm]{reset} {yellow}note{reset}: prune requires existing cached instances; run 'pacm install'",
+            gray = C_GRAY,
+            yellow = C_YELLOW,
+            reset = C_RESET
+        );
+    }
+    Ok(())
+}
+
+fn cmd_remove(packages: Vec<String>) -> Result<()> {
+    let start = Instant::now();
+    if packages.is_empty() {
+        bail!("no packages specified to remove");
+    }
+    let manifest_path = PathBuf::from("package.json");
+    if !manifest_path.exists() {
+        bail!("no package.json found");
+    }
+    let mut manifest = manifest::load(&manifest_path)?;
+    // Track which actually existed
+    let mut actually_removed: Vec<String> = Vec::new();
+    for name in &packages {
+        if manifest.dependencies.remove(name).is_some() {
+            actually_removed.push(name.clone());
+        }
+        if manifest.dev_dependencies.remove(name).is_some() {
+            if !actually_removed.contains(name) { actually_removed.push(name.clone()); }
+        }
+        if manifest.optional_dependencies.remove(name).is_some() {
+            if !actually_removed.contains(name) { actually_removed.push(name.clone()); }
+        }
+    }
+    if actually_removed.is_empty() {
+        println!("{gray}[pacm]{reset} {dim}no matching dependencies to remove{reset}", gray=C_GRAY, dim=C_DIM, reset=C_RESET);
+        return Ok(());
+    }
+    // Persist updated manifest
+    manifest::write(&manifest, &manifest_path)?;
+
+    // Load or create lockfile
+    let lock_path = PathBuf::from("pacm.lockb");
+    let mut lock = if lock_path.exists() { lockfile::load(&lock_path)? } else { Lockfile::default() };
+
+    // Remove root lock entries for removed packages
+    prune_removed_from_lock(&mut lock, &actually_removed);
+
+    // Build reachable set from updated root using lock entries
+    let mut roots: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    for (n, _) in &manifest.dependencies { roots.push_back(n.clone()); }
+    for (n, _) in &manifest.dev_dependencies { roots.push_back(n.clone()); }
+    for (n, _) in &manifest.optional_dependencies { roots.push_back(n.clone()); }
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut instances: BTreeMap<String, PackageInstance> = BTreeMap::new();
+    while let Some(name) = roots.pop_front() {
+        if !seen.insert(name.clone()) { continue; }
+        let key = format!("node_modules/{}", name);
+        if let Some(entry) = lock.packages.get(&key) {
+            // Record instance (version may be None; use empty string)
+            let ver = entry.version.clone().unwrap_or_default();
+            let deps = entry.dependencies.clone();
+            instances.insert(name.clone(), PackageInstance { name: name.clone(), version: ver, dependencies: deps.clone() });
+            for (dn, _) in deps { roots.push_back(dn); }
+        }
+    }
+
+    // Prune any unreachable lock entries and delete directories
+    let trans_removed = prune_unreachable(&mut lock, &instances);
+    let mut to_delete = actually_removed.clone();
+    to_delete.extend(trans_removed.into_iter());
+    if !to_delete.is_empty() {
+        remove_dirs(&to_delete);
+    }
+
+    // Write lockfile or delete if empty
+    lockfile::write(&lock, lock_path.clone())?;
+    if lockfile_has_no_packages(&lock) {
+        let _ = std::fs::remove_file(&lock_path);
+    }
+    cleanup_empty_node_modules_dir();
+
+    // Output summary
+    for n in &actually_removed {
+        if let Some(ver) = lock.packages.get(&format!("node_modules/{}", n)).and_then(|e| e.version.clone()) {
+            println!("{gray}[pacm]{reset} {red}-{reset} {name}@{ver}", gray=C_GRAY, red=C_RED, reset=C_RESET, name=n, ver=ver);
+        } else {
+            println!("{gray}[pacm]{reset} {red}-{reset} {name}", gray=C_GRAY, red=C_RED, reset=C_RESET, name=n);
+        }
+    }
+    let dur = start.elapsed();
+    println!(
+        "{gray}[pacm]{reset} summary: {red}{rm} removed{reset} in {secs:.2?}",
+        gray = C_GRAY,
+        red = C_RED,
+        rm = to_delete.len(),
+        secs = dur,
+        reset = C_RESET
+    );
+    Ok(())
+}
+
 fn build_fast_instances(
     manifest: &Manifest,
     lock: &Lockfile,
@@ -847,22 +1177,17 @@ fn build_fast_instances(
     for name in needed.iter() {
         let key = format!("node_modules/{}", name);
         let entry = lock.packages.get(&key)?; // missing -> cannot fast path
-        let version = entry.version.clone()?;
-        let integrity = entry.integrity.clone()?;
-        let hex = match store::exists_by_integrity(&integrity) {
-            Some(h) => h,
-            None => return None,
-        };
-        if !store::package_path(&hex).exists() {
+    let version = entry.version.clone()?;
+    let _ = entry.integrity.as_ref()?;
+        if !crate::cache::cache_package_path(&name, &version).exists() {
             return None;
         }
         instances.insert(
             name.clone(),
             PackageInstance {
                 name: name.clone(),
-                version,
+                version: version.clone(),
                 dependencies: entry.dependencies.clone(),
-                store_hex: hex,
             },
         );
     }
@@ -877,31 +1202,76 @@ fn prune_removed_from_lock(lock: &mut Lockfile, removed: &[String]) {
     // Also update root dependencies already changed by sync_from_manifest
 }
 
-fn prune_unreachable(lock: &mut Lockfile, instances: &BTreeMap<String, PackageInstance>) {
+fn prune_unreachable(
+    lock: &mut Lockfile,
+    instances: &BTreeMap<String, PackageInstance>,
+) -> Vec<String> {
     let keep: std::collections::HashSet<String> = instances.keys().cloned().collect();
-    let mut to_remove: Vec<String> = Vec::new();
+    let mut to_remove_keys: Vec<String> = Vec::new();
+    let mut removed_names: Vec<String> = Vec::new();
     for k in lock.packages.keys() {
         if k.is_empty() {
             continue;
         }
         if let Some(stripped) = k.strip_prefix("node_modules/") {
             if !keep.contains(stripped) {
-                to_remove.push(k.clone());
+                to_remove_keys.push(k.clone());
+                removed_names.push(stripped.to_string());
             }
         }
     }
-    for k in to_remove {
+    for k in to_remove_keys {
         lock.packages.remove(&k);
     }
+    removed_names
 }
 
 fn remove_dirs(names: &[String]) {
     use std::fs;
     for n in names {
-        let p = PathBuf::from("node_modules").join(n);
+        let mut p = PathBuf::from("node_modules");
+        // Support scoped packages by splitting on '/'
+        for part in n.split('/') {
+            p = p.join(part);
+        }
         if p.exists() {
             let _ = fs::remove_dir_all(&p);
+            // If this was a scoped package, try to remove now-empty scope folder
+            if let Some(scope_dir) = p.parent() {
+                if let Ok(mut rd) = fs::read_dir(scope_dir) {
+                    if rd.next().is_none() {
+                        let _ = fs::remove_dir(scope_dir);
+                    }
+                }
+            }
         }
+    }
+    // If node_modules is now empty (and only possibly .pacm remains later), we'll not remove it here.
+}
+
+fn cleanup_empty_node_modules_dir() {
+    use std::fs;
+    let nm = PathBuf::from("node_modules");
+    if nm.exists() {
+        if let Ok(mut rd) = fs::read_dir(&nm) {
+            if rd.next().is_none() {
+                let _ = fs::remove_dir(&nm);
+            }
+        }
+    }
+}
+
+fn lockfile_has_no_packages(lock: &Lockfile) -> bool {
+    if let Some(root) = lock.packages.get("") {
+        let only_root = lock.packages.len() == 1;
+        let no_deps = root.dependencies.is_empty()
+            && root.dev_dependencies.is_empty()
+            && root.optional_dependencies.is_empty()
+            && root.peer_dependencies.is_empty();
+        only_root && no_deps
+    } else {
+        // No root entry and no packages -> treat as empty
+        lock.packages.is_empty()
     }
 }
 
@@ -931,6 +1301,7 @@ fn perform_download(
                     downloaded,
                     total,
                     done: false,
+                    started_at: Instant::now(),
                 });
                 *idx_lock = Some(dls.len() - 1);
             } else {

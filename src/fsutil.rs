@@ -1,10 +1,10 @@
 use dirs::data_local_dir;
 use std::path::{Path, PathBuf};
 
-pub fn store_root() -> PathBuf {
+pub fn cache_root() -> PathBuf {
     let mut root = data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     root.push("pacm");
-    root.push("store");
+    root.push("cache");
     root.push("v1");
     root
 }

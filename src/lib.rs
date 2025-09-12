@@ -1,10 +1,11 @@
+#[path = "cli.rs"]
 pub mod cli;
 pub mod colors;
 pub mod error;
 pub mod fetch;
 pub mod fsutil;
-pub mod linker;
+pub mod installer;
 pub mod lockfile;
 pub mod manifest;
 pub mod resolver;
-pub mod store;
+pub mod cache;

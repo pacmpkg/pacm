@@ -106,13 +106,8 @@ impl Fetcher {
 #[derive(Debug, Deserialize, Clone)]
 pub struct NpmMetadata {
     #[serde(rename = "dist-tags")]
-    pub dist_tags: Option<DistTags>,
+    pub dist_tags: Option<std::collections::HashMap<String, String>>,
     pub versions: std::collections::HashMap<String, NpmVersion>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct DistTags {
-    pub latest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

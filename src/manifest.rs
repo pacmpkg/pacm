@@ -20,6 +20,12 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub optional_dependencies: BTreeMap<String, String>,
+    #[serde(
+        default,
+        rename = "peerDependencies",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub peer_dependencies: BTreeMap<String, String>,
 }
 
 impl Manifest {
@@ -30,6 +36,7 @@ impl Manifest {
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
         }
     }
 }
