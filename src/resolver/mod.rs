@@ -17,16 +17,52 @@ impl Resolver {
         range: &str,
     ) -> Result<(Version, String)> {
         let norm = canonicalize_npm_range(range);
-        let req = if norm == "*" {
-            VersionReq::STAR
+        // Support npm-style OR sets using '||' by evaluating as union of sub-ranges
+        let is_or = range.contains("||") || norm.contains("||");
+        let reqs: Vec<VersionReq> = if is_or {
+            let parts: Vec<&str> = range
+                .split("||")
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let mut v: Vec<VersionReq> = Vec::new();
+            for p in parts {
+                let pnorm = canonicalize_npm_range(p);
+                if pnorm == "*" {
+                    v.push(VersionReq::STAR);
+                } else {
+                    match VersionReq::from_str(&pnorm) {
+                        Ok(r) => v.push(r),
+                        Err(e) => {
+                            return Err(anyhow!(
+                                "invalid semver sub-range '{}' (orig '{}'): {}",
+                                pnorm,
+                                p,
+                                e
+                            ))
+                        }
+                    }
+                }
+            }
+            if v.is_empty() {
+                return Err(anyhow!("empty OR range '{}'", range));
+            }
+            v
         } else {
-            VersionReq::from_str(&norm)
-                .map_err(|e| anyhow!("invalid semver range '{}'(orig '{}'): {}", norm, range, e))?
+            let req = if norm == "*" {
+                VersionReq::STAR
+            } else {
+                VersionReq::from_str(&norm).map_err(|e| {
+                    anyhow!("invalid semver range '{}' (orig '{}'): {}", norm, range, e)
+                })?
+            };
+            vec![req]
         };
         let mut candidates: Vec<_> = versions.iter().collect();
         candidates.sort_by(|a, b| b.0.cmp(a.0)); // descending
         for (ver, tarball) in candidates {
-            if req.matches(ver) {
+            // Any-of matching for OR sets; single element behaves as before
+            if reqs.iter().any(|r| r.matches(ver)) {
                 return Ok((ver.clone(), tarball.clone()));
             }
         }
@@ -48,6 +84,16 @@ pub fn canonicalize_npm_range(input: &str) -> String {
     let s = input.trim();
     if s.is_empty() || s == "*" || s == "latest" {
         return "*".into();
+    }
+
+    // Preserve npm-style OR sets. We'll evaluate them in the resolver by splitting.
+    if s.contains("||") {
+        return s.to_string();
+    }
+
+    // If it parses as a full semver (including prerelease/build), treat as exact
+    if semver::Version::parse(s).is_ok() {
+        return format!("={}", s);
     }
 
     // Hyphen range: "1.2.3 - 2.3.4" => ">=1.2.3, <=2.3.4"

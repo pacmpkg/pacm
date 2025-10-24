@@ -4,5 +4,4 @@ target/
 Cargo.lock
 *.log
 /.idea/
-/.vscode/
 node_modules/

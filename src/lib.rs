@@ -1,3 +1,4 @@
+pub mod cache;
 #[path = "cli.rs"]
 pub mod cli;
 pub mod colors;
@@ -8,4 +9,3 @@ pub mod installer;
 pub mod lockfile;
 pub mod manifest;
 pub mod resolver;
-pub mod cache;

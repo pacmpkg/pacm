@@ -2,13 +2,13 @@ use crate::fsutil::cache_root;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::read::GzDecoder;
+use semver::Version;
+use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use tar::Archive;
-use semver::Version;
-use serde::Deserialize;
 
 fn cache_dir_for(name: &str, version: &str) -> PathBuf {
     let mut root = cache_root();
@@ -73,11 +73,12 @@ pub fn ensure_cached_package(
             continue;
         }
         let comps: Vec<_> = path.components().collect();
-        let stripped: std::path::PathBuf = if comps.len() > 1 && comps[0].as_os_str() == OsStr::new("package") {
-            comps[1..].iter().collect()
-        } else {
-            path.to_path_buf()
-        };
+        let stripped: std::path::PathBuf =
+            if comps.len() > 1 && comps[0].as_os_str() == OsStr::new("package") {
+                comps[1..].iter().collect()
+            } else {
+                path.to_path_buf()
+            };
         if stripped.as_os_str().is_empty() {
             continue;
         }
@@ -140,6 +141,31 @@ pub struct CachedManifest {
     pub version: Option<String>,
     #[serde(default)]
     pub dependencies: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "optionalDependencies")]
+    pub optional_dependencies: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "peerDependencies")]
+    pub peer_dependencies: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "peerDependenciesMeta")]
+    pub peer_dependencies_meta: std::collections::BTreeMap<String, PeerMeta>,
+    #[serde(default)]
+    pub bin: Option<BinField>,
+    #[serde(default)]
+    pub os: Vec<String>,
+    #[serde(default, rename = "cpu")]
+    pub cpu_arch: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum BinField {
+    Single(String),
+    Map(std::collections::BTreeMap<String, String>),
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PeerMeta {
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// Read the cached package.json for a cached package, returning minimal fields.

@@ -17,6 +17,9 @@ static CLIENT: Lazy<Client> = Lazy::new(|| {
 static META_CACHE: Lazy<Mutex<HashMap<String, NpmMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static VERSION_CACHE: Lazy<Mutex<HashMap<String, NpmVersion>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 #[derive(Debug, Clone)]
 pub struct Fetcher {
     registry: String,
@@ -33,13 +36,7 @@ impl Fetcher {
         if let Some(hit) = META_CACHE.lock().unwrap().get(name).cloned() {
             return Ok(hit);
         }
-        // NPM registry expects scoped package names to be URL-encoded (e.g. @scope%2Fpkg)
-        let encoded_name = if name.contains('/') {
-            name.replace("/", "%2F")
-        } else {
-            name.to_string()
-        };
-        let url = format!("{}/{}", self.registry, encoded_name);
+        let url = format!("{}/{}", self.registry, name.to_string());
         let resp = CLIENT
             .get(&url)
             .send()
@@ -53,6 +50,48 @@ impl Fetcher {
             .unwrap()
             .insert(name.to_string(), meta.clone());
         Ok(meta)
+    }
+
+    pub fn package_version_metadata(&self, name: &str, spec: &str) -> Result<NpmVersion> {
+        let trimmed_spec = spec.trim();
+        let lookup_key = format!("{}@{}", name, trimmed_spec);
+        if let Some(hit) = VERSION_CACHE
+            .lock()
+            .unwrap()
+            .get(&lookup_key)
+            .cloned()
+        {
+            return Ok(hit);
+        }
+        if let Some(meta_hit) = META_CACHE.lock().unwrap().get(name).cloned() {
+            if let Some(from_meta) = lookup_version_in_meta(&meta_hit, trimmed_spec) {
+                cache_version_entry(name, trimmed_spec, &from_meta);
+                cache_version_entry(name, &from_meta.version, &from_meta);
+                return Ok(from_meta);
+            }
+        }
+        let url = format!(
+            "{}/{}/{}",
+            self.registry,
+            name.to_string(),
+            trimmed_spec
+        );
+        let resp = CLIENT
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {}", url))?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "registry returned {} for {}@{}",
+                resp.status(),
+                name,
+                trimmed_spec
+            );
+        }
+        let version_meta: NpmVersion = resp.json()?;
+        cache_version_entry(name, trimmed_spec, &version_meta);
+        cache_version_entry(name, &version_meta.version, &version_meta);
+        Ok(version_meta)
     }
 
     pub fn download_tarball(&self, url: &str) -> Result<Vec<u8>> {
@@ -116,6 +155,16 @@ pub struct NpmVersion {
     pub dist: NpmDist,
     #[serde(default)]
     pub dependencies: std::collections::HashMap<String, String>,
+    #[serde(default, rename = "optionalDependencies")]
+    pub optional_dependencies: std::collections::HashMap<String, String>,
+    #[serde(default, rename = "peerDependencies")]
+    pub peer_dependencies: std::collections::HashMap<String, String>,
+    #[serde(default, rename = "peerDependenciesMeta")]
+    pub peer_dependencies_meta: std::collections::HashMap<String, PeerMeta>,
+    #[serde(default)]
+    pub os: Vec<String>,
+    #[serde(default, rename = "cpu")]
+    pub cpu_arch: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -123,4 +172,31 @@ pub struct NpmDist {
     pub tarball: String,
     pub integrity: Option<String>,
     pub shasum: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PeerMeta {
+    #[serde(default)]
+    pub optional: bool,
+}
+
+fn lookup_version_in_meta(meta: &NpmMetadata, spec: &str) -> Option<NpmVersion> {
+    if let Some(ver) = meta.versions.get(spec) {
+        return Some(ver.clone());
+    }
+    if let Some(tags) = &meta.dist_tags {
+        if let Some(mapped) = tags.get(spec) {
+            if let Some(ver) = meta.versions.get(mapped) {
+                return Some(ver.clone());
+            }
+        }
+    }
+    None
+}
+
+fn cache_version_entry(name: &str, spec: &str, version: &NpmVersion) {
+    VERSION_CACHE
+        .lock()
+        .unwrap()
+        .insert(format!("{}@{}", name, spec), version.clone());
 }
