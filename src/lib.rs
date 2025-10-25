@@ -1,5 +1,4 @@
 pub mod cache;
-#[path = "cli.rs"]
 pub mod cli;
 pub mod colors;
 pub mod error;

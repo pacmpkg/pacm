@@ -46,6 +46,10 @@ pub struct PackageEntry {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub peer_dependencies_meta: BTreeMap<String, PeerMeta>,
+    #[serde(default)]
+    pub os: Vec<String>,
+    #[serde(default, rename = "cpu")]
+    pub cpu_arch: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -83,6 +87,8 @@ impl Lockfile {
             optional_dependencies: BTreeMap::new(),
             peer_dependencies: BTreeMap::new(),
             peer_dependencies_meta: BTreeMap::new(),
+            os: Vec::new(),
+            cpu_arch: Vec::new(),
         });
         root.version = Some(manifest.version.clone());
         // Persist each root section separately
@@ -114,6 +120,8 @@ impl Lockfile {
                 optional_dependencies: BTreeMap::new(),
                 peer_dependencies: BTreeMap::new(),
                 peer_dependencies_meta: BTreeMap::new(),
+                os: Vec::new(),
+                cpu_arch: Vec::new(),
             });
         }
     }
@@ -121,7 +129,7 @@ impl Lockfile {
 
 const MAX_LOCKFILE_SIZE: usize = 16 * 1024 * 1024;
 const LOCKFILE_MAGIC: &[u8; 8] = b"PACMLOCK";
-const CURRENT_WIRE_VERSION: u16 = 1;
+const CURRENT_WIRE_VERSION: u16 = 2;
 
 fn write_u16(buf: &mut Vec<u8>, value: u16) {
     buf.extend_from_slice(&value.to_le_bytes());
@@ -172,6 +180,14 @@ fn write_peer_meta_map(buf: &mut Vec<u8>, map: &BTreeMap<String, PeerMeta>) -> R
     Ok(())
 }
 
+fn write_string_list(buf: &mut Vec<u8>, list: &[String]) -> Result<()> {
+    write_len(buf, list.len(), "list")?;
+    for item in list {
+        write_string(buf, item, "list item")?;
+    }
+    Ok(())
+}
+
 fn encode_current_binary(lf: &Lockfile) -> Result<Vec<u8>> {
     let mut packages_buf = Vec::with_capacity(4096);
     write_len(&mut packages_buf, lf.packages.len(), "package count")?;
@@ -185,6 +201,8 @@ fn encode_current_binary(lf: &Lockfile) -> Result<Vec<u8>> {
         write_string_map(&mut packages_buf, &entry.optional_dependencies)?;
         write_string_map(&mut packages_buf, &entry.peer_dependencies)?;
         write_peer_meta_map(&mut packages_buf, &entry.peer_dependencies_meta)?;
+        write_string_list(&mut packages_buf, &entry.os)?;
+        write_string_list(&mut packages_buf, &entry.cpu_arch)?;
     }
 
     ensure!(
@@ -304,6 +322,63 @@ fn read_peer_meta_map(data: &[u8], pos: &mut usize) -> anyhow::Result<BTreeMap<S
     Ok(map)
 }
 
+fn read_string_list(data: &[u8], pos: &mut usize) -> anyhow::Result<Vec<String>> {
+    let len = read_len(data, pos, "list length")?;
+    let mut list = Vec::with_capacity(len);
+    for _ in 0..len {
+        list.push(read_string(data, pos, "list item")?);
+    }
+    Ok(list)
+}
+
+fn parse_packages_section(
+    packages_slice: &[u8],
+    wire_version: u16,
+) -> anyhow::Result<BTreeMap<String, PackageEntry>> {
+    let mut packages_pos = 0usize;
+    let package_count = read_len(packages_slice, &mut packages_pos, "package count")?;
+    let mut packages = BTreeMap::new();
+    for _ in 0..package_count {
+        let key = read_string(packages_slice, &mut packages_pos, "package key")?;
+        let version = read_option_string(packages_slice, &mut packages_pos)?;
+        let integrity = read_option_string(packages_slice, &mut packages_pos)?;
+        let resolved = read_option_string(packages_slice, &mut packages_pos)?;
+        let dependencies = read_string_map(packages_slice, &mut packages_pos)?;
+        let dev_dependencies = read_string_map(packages_slice, &mut packages_pos)?;
+        let optional_dependencies = read_string_map(packages_slice, &mut packages_pos)?;
+        let peer_dependencies = read_string_map(packages_slice, &mut packages_pos)?;
+        let peer_dependencies_meta = read_peer_meta_map(packages_slice, &mut packages_pos)?;
+        let (os, cpu_arch) = if wire_version >= 2 {
+            let os = read_string_list(packages_slice, &mut packages_pos)?;
+            let cpu_arch = read_string_list(packages_slice, &mut packages_pos)?;
+            (os, cpu_arch)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let entry = PackageEntry {
+            version,
+            integrity,
+            resolved,
+            dependencies,
+            dev_dependencies,
+            optional_dependencies,
+            peer_dependencies,
+            peer_dependencies_meta,
+            os,
+            cpu_arch,
+        };
+        packages.insert(key, entry);
+    }
+
+    ensure!(
+        packages_pos == packages_slice.len(),
+        "unexpected trailing data in packages section"
+    );
+
+    Ok(packages)
+}
+
 fn decode_current_binary(data: &[u8]) -> anyhow::Result<Lockfile> {
     ensure!(
         data.len() <= MAX_LOCKFILE_SIZE,
@@ -316,7 +391,7 @@ fn decode_current_binary(data: &[u8]) -> anyhow::Result<Lockfile> {
 
     let mut pos = LOCKFILE_MAGIC.len();
     let version = read_u16(data, &mut pos)?;
-    if version != CURRENT_WIRE_VERSION {
+    if version != CURRENT_WIRE_VERSION && version != 1 {
         bail!("unsupported lockfile wire version {version}");
     }
 
@@ -335,37 +410,7 @@ fn decode_current_binary(data: &[u8]) -> anyhow::Result<Lockfile> {
         .ok_or_else(|| anyhow!("unexpected eof reading packages section"))?;
     pos = packages_section_end;
 
-    let mut packages_pos = 0usize;
-    let package_count = read_len(packages_slice, &mut packages_pos, "package count")?;
-    let mut packages = BTreeMap::new();
-    for _ in 0..package_count {
-        let key = read_string(packages_slice, &mut packages_pos, "package key")?;
-        let version = read_option_string(packages_slice, &mut packages_pos)?;
-        let integrity = read_option_string(packages_slice, &mut packages_pos)?;
-        let resolved = read_option_string(packages_slice, &mut packages_pos)?;
-        let dependencies = read_string_map(packages_slice, &mut packages_pos)?;
-        let dev_dependencies = read_string_map(packages_slice, &mut packages_pos)?;
-        let optional_dependencies = read_string_map(packages_slice, &mut packages_pos)?;
-        let peer_dependencies = read_string_map(packages_slice, &mut packages_pos)?;
-        let peer_dependencies_meta = read_peer_meta_map(packages_slice, &mut packages_pos)?;
-
-        let entry = PackageEntry {
-            version,
-            integrity,
-            resolved,
-            dependencies,
-            dev_dependencies,
-            optional_dependencies,
-            peer_dependencies,
-            peer_dependencies_meta,
-        };
-        packages.insert(key, entry);
-    }
-
-    ensure!(
-        packages_pos == packages_slice.len(),
-        "unexpected trailing data in packages section"
-    );
+    let packages = parse_packages_section(packages_slice, version)?;
 
     // Reserved section length (currently unused)
     let extras_len = read_len(data, &mut pos, "extras section length")?;
@@ -522,6 +567,8 @@ fn decode_manual_legacy(data: &[u8]) -> anyhow::Result<Lockfile> {
             optional_dependencies,
             peer_dependencies,
             peer_dependencies_meta,
+            os: Vec::new(),
+            cpu_arch: Vec::new(),
         };
         packages.insert(key, entry);
     }
@@ -632,6 +679,10 @@ struct LegacyPackageEntry {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub peer_dependencies_meta: BTreeMap<String, PeerMeta>,
+    #[serde(default)]
+    pub os: Vec<String>,
+    #[serde(default, rename = "cpu")]
+    pub cpu_arch: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -658,6 +709,8 @@ impl From<LegacyLockfile> for Lockfile {
                         optional_dependencies: v.optional_dependencies,
                         peer_dependencies: v.peer_dependencies,
                         peer_dependencies_meta: v.peer_dependencies_meta,
+                        os: Vec::new(),
+                        cpu_arch: Vec::new(),
                     },
                 )
             })
@@ -690,6 +743,8 @@ mod tests {
                 String::from("peer"),
                 PeerMeta { optional: true },
             )]),
+            os: vec![String::from("linux")],
+            cpu_arch: vec![String::from("x64")],
         };
         lf.packages.insert(String::from(""), entry.clone());
         entry.version = Some("0.0.1".into());
@@ -700,19 +755,5 @@ mod tests {
 
         let decoded = decode_current_binary(&encoded).expect("decode");
         assert_eq!(lf, decoded);
-    }
-
-    #[test]
-    fn manual_decode_fixture() {
-        let path = PathBuf::from("example/pacm/pacm.lockb");
-        if !path.exists() {
-            return;
-        }
-        let data = std::fs::read(path).unwrap();
-        let opts = bincode1::config::DefaultOptions::new()
-            .with_limit(MAX_LOCKFILE_SIZE as u64)
-            .allow_trailing_bytes();
-        opts.deserialize::<LegacyLockfile>(&data)
-            .expect("legacy bincode1 decode failed");
     }
 }

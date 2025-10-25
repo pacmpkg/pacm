@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Dependency lock file",
+  "type": "object",
+  "required": ["format", "packages"],
+  "properties": {
+    "format": { "type": "integer", "const": 1 },
+    "packages": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["version"],
+        "properties": {
+          "version": { "type": "string" },
+          "integrity": { "type": ["string", "null"] },
+          "resolved": { "type": ["string", "null"] },
+          "dependencies": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "default": {}
+          },
+          "devDependencies": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "default": {}
+          },
+          "optionalDependencies": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "default": {}
+          },
+          "peerDependencies": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "default": {}
+          },
+          "peerDependenciesMeta": {
+            "type": "object",
+            "additionalProperties": { "type": "object" },
+            "default": {}
+          },
+          "os": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "cpu": { "type": "array", "items": { "type": "string" }, "default": [] }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}
