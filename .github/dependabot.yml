@@ -8,7 +8,8 @@ updates:
     reviewers:
       - "pacmpkg/maintainers"
     assignees:
-      - "pacmpkg/maintainers"
+      - "builtbyjonas"
+      - "SamTheDevDE"
     commit-message:
       prefix: "deps"
       include: "scope"
@@ -21,7 +22,8 @@ updates:
     reviewers:
       - "pacmpkg/maintainers"
     assignees:
-      - "pacmpkg/maintainers"
+      - "builtbyjonas"
+      - "SamTheDevDE"
     commit-message:
       prefix: "ci"
       include: "scope"
