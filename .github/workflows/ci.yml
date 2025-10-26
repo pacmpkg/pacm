@@ -158,7 +158,12 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: pacm-${{ matrix.target }}
-        path: target/${{ matrix.target }}/release/pacm*
+        path: |
+          target/${{ matrix.target }}/release/pacm
+          target/${{ matrix.target }}/release/pacm.exe
+          target/${{ matrix.target }}/release/pacm-shim
+          target/${{ matrix.target }}/release/pacm-shim.exe
+        if-no-files-found: ignore
 
   security-audit:
     name: Security Audit
