@@ -106,7 +106,7 @@ The project includes a comprehensive testing suite located in `tests/`. Run test
 cargo test
 ```
 
-See [tests/README.md](tests/README.md) for details about the testing structure.
+See [tests/README.md](https://github.com/pacmpkg/tests/blob/main/README.md) for details about the testing structure.
 
 ## 🤝 Contributing
 
