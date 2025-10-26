@@ -36,10 +36,9 @@ pub fn ensure_cached_package(
     let mut hasher = Sha512::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    let computed_integrity = format!("sha512-{}", STANDARD.encode(&digest));
+    let computed_integrity = format!("sha512-{}", STANDARD.encode(digest));
     if let Some(integrity) = integrity_hint {
-        if integrity.starts_with("sha512-") {
-            let b64 = &integrity[7..];
+        if let Some(b64) = integrity.strip_prefix("sha512-") {
             let raw = STANDARD
                 .decode(b64)
                 .with_context(|| "decode integrity base64")?;

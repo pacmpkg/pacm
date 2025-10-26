@@ -28,16 +28,11 @@ pub fn cmd_pm_lockfile(format: String, save: bool) -> Result<()> {
     };
 
     if save {
-        let file = format!("pacm-lock.readable.{}", ext);
+        let file = format!("pacm-lock.readable.{ext}");
         std::fs::write(&file, &output)?;
-        println!(
-            "{gray}[pacm]{reset} wrote {file}",
-            gray = C_GRAY,
-            reset = C_RESET,
-            file = file
-        );
+        println!("{C_GRAY}[pacm]{C_RESET} wrote {file}");
     } else {
-        println!("{}", output);
+        println!("{output}");
     }
     Ok(())
 }
@@ -71,19 +66,10 @@ pub fn cmd_pm_prune() -> Result<()> {
                 count = removed.len()
             );
         } else {
-            println!(
-                "{gray}[pacm]{reset} nothing to prune",
-                gray = C_GRAY,
-                reset = C_RESET
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} nothing to prune");
         }
     } else {
-        println!(
-            "{gray}[pacm]{reset} {yellow}note{reset}: prune requires existing cached instances; run 'pacm install'",
-            gray = C_GRAY,
-            yellow = C_YELLOW,
-            reset = C_RESET
-        );
+        println!("{C_GRAY}[pacm]{C_RESET} {C_YELLOW}note{C_RESET}: prune requires existing cached instances; run 'pacm install'");
     }
     Ok(())
 }

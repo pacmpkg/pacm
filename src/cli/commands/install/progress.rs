@@ -54,12 +54,5 @@ pub(super) fn format_status(kind: &str, detail: &str) -> String {
         "fast" => (C_GREEN, "fast"),
         _ => (C_DIM, kind),
     };
-    format!(
-        "{gray}[pacm]{reset} {color}{action}{reset} {detail}",
-        gray = C_GRAY,
-        reset = C_RESET,
-        color = color,
-        action = action,
-        detail = detail
-    )
+    format!("{C_GRAY}[pacm]{C_RESET} {color}{action}{C_RESET} {detail}")
 }

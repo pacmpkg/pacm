@@ -4,7 +4,7 @@ use std::process::Command;
 
 fn main() {
     if let Err(e) = real_main() {
-        eprintln!("pacm-shim error: {:#}", e);
+        eprintln!("pacm-shim error: {e:#}");
         std::process::exit(1);
     }
 }
@@ -17,7 +17,7 @@ fn real_main() -> anyhow::Result<()> {
     let file = fs::File::open(&exe)?;
     let reader = BufReader::new(file);
     let mut target_rel: Option<String> = None;
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("PACM_SHIM:") {
             target_rel = Some(rest.trim().to_string());
         }

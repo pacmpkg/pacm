@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 pub(crate) fn prune_removed_from_lock(lock: &mut Lockfile, removed: &[String]) {
     for name in removed {
-        let key = format!("node_modules/{}", name);
+        let key = format!("node_modules/{name}");
         lock.packages.remove(&key);
     }
 }
@@ -22,7 +22,7 @@ pub(crate) fn prune_unreachable(lock: &mut Lockfile) -> Vec<String> {
         if !reachable.insert(name.clone()) {
             continue;
         }
-        let key = format!("node_modules/{}", name);
+        let key = format!("node_modules/{name}");
         if let Some(entry) = lock.packages.get(&key) {
             enqueue_entry(entry, &mut queue);
         }

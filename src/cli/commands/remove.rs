@@ -23,23 +23,17 @@ pub fn cmd_remove(packages: Vec<String>) -> Result<()> {
 
     let mut actually_removed = Vec::new();
     for name in &packages {
-        if manifest.dependencies.remove(name).is_some()
+        if (manifest.dependencies.remove(name).is_some()
             || manifest.dev_dependencies.remove(name).is_some()
-            || manifest.optional_dependencies.remove(name).is_some()
+            || manifest.optional_dependencies.remove(name).is_some())
+            && !actually_removed.contains(name)
         {
-            if !actually_removed.contains(name) {
-                actually_removed.push(name.clone());
-            }
+            actually_removed.push(name.clone());
         }
     }
 
     if actually_removed.is_empty() {
-        println!(
-            "{gray}[pacm]{reset} {dim}no matching dependencies to remove{reset}",
-            gray = C_GRAY,
-            dim = C_DIM,
-            reset = C_RESET
-        );
+        println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no matching dependencies to remove{C_RESET}");
         return Ok(());
     }
 
@@ -55,7 +49,7 @@ pub fn cmd_remove(packages: Vec<String>) -> Result<()> {
     prune_removed_from_lock(&mut lock, &actually_removed);
     let trans_removed = prune_unreachable(&mut lock);
     let mut to_delete = actually_removed.clone();
-    to_delete.extend(trans_removed.into_iter());
+    to_delete.extend(trans_removed);
     if !to_delete.is_empty() {
         remove_dirs(&to_delete);
     }
@@ -69,25 +63,12 @@ pub fn cmd_remove(packages: Vec<String>) -> Result<()> {
     for name in &actually_removed {
         if let Some(version) = lock
             .packages
-            .get(&format!("node_modules/{}", name))
+            .get(&format!("node_modules/{name}"))
             .and_then(|entry| entry.version.clone())
         {
-            println!(
-                "{gray}[pacm]{reset} {red}-{reset} {name}@{version}",
-                gray = C_GRAY,
-                red = C_RED,
-                reset = C_RESET,
-                name = name,
-                version = version
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {name}@{version}");
         } else {
-            println!(
-                "{gray}[pacm]{reset} {red}-{reset} {name}",
-                gray = C_GRAY,
-                red = C_RED,
-                reset = C_RESET,
-                name = name
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {name}");
         }
     }
 

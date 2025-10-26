@@ -9,13 +9,13 @@ pub(crate) fn build_fast_instances(
 ) -> Option<BTreeMap<String, PackageInstance>> {
     use std::collections::{HashSet, VecDeque};
     let mut needed: HashSet<String> = HashSet::new();
-    for (name, _) in &manifest.dependencies {
+    for name in manifest.dependencies.keys() {
         needed.insert(name.clone());
     }
-    for (name, _) in &manifest.dev_dependencies {
+    for name in manifest.dev_dependencies.keys() {
         needed.insert(name.clone());
     }
-    for (name, _) in &manifest.optional_dependencies {
+    for name in manifest.optional_dependencies.keys() {
         needed.insert(name.clone());
     }
     if needed.is_empty() {
@@ -24,7 +24,7 @@ pub(crate) fn build_fast_instances(
 
     let mut queue: VecDeque<String> = needed.iter().cloned().collect();
     while let Some(name) = queue.pop_front() {
-        let key = format!("node_modules/{}", name);
+        let key = format!("node_modules/{name}");
         if let Some(entry) = lock.packages.get(&key) {
             for dep in entry.dependencies.keys() {
                 if needed.insert(dep.clone()) {
@@ -38,7 +38,7 @@ pub(crate) fn build_fast_instances(
 
     let mut instances: BTreeMap<String, PackageInstance> = BTreeMap::new();
     for name in needed.iter() {
-        let key = format!("node_modules/{}", name);
+        let key = format!("node_modules/{name}");
         let entry = lock.packages.get(&key)?;
         let version = entry.version.clone()?;
         let _ = entry.integrity.as_ref()?;

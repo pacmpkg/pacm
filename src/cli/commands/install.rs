@@ -9,7 +9,7 @@ pub(crate) use prune::{
 mod download;
 mod fast;
 mod install_command;
-mod manifest_updates;
+pub mod manifest_updates;
 mod node_modules;
 mod platform;
 mod progress;

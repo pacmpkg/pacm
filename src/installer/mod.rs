@@ -52,6 +52,12 @@ impl Installer {
     }
 }
 
+impl Default for Installer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     if !to.exists() {
         fs::create_dir_all(to)?;
@@ -63,10 +69,8 @@ pub fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
         let dst = to.join(entry.file_name());
         if meta.is_dir() {
             copy_dir_recursive(&p, &dst)?;
-        } else {
-            if let Err(_e) = std::fs::hard_link(&p, &dst) {
-                std::fs::copy(&p, &dst)?;
-            }
+        } else if let Err(_e) = std::fs::hard_link(&p, &dst) {
+            std::fs::copy(&p, &dst)?;
         }
     }
     Ok(())
@@ -140,7 +144,7 @@ fn create_bin_shims(project_root: &Path, package_name: &str, pkg_dest_dir: &Path
         #[cfg(windows)]
         {
             // Only create .exe and .exe.shim on Windows
-            let exe_path = bin_dir.join(format!("{}.exe", bin_name));
+            let exe_path = bin_dir.join(format!("{bin_name}.exe"));
             write_windows_exe_shim(&exe_path, &rel_from_bin)?;
         }
         #[cfg(unix)]

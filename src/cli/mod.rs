@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod commands;
+pub mod commands;
 
 #[derive(Parser, Debug)]
 #[command(

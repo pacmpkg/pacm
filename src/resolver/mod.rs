@@ -6,6 +6,12 @@ use std::str::FromStr;
 #[derive(Debug)]
 pub struct Resolver;
 
+impl Default for Resolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Resolver {
     pub fn new() -> Self {
         Self
@@ -72,7 +78,7 @@ impl Resolver {
 
 pub fn map_versions(meta: &crate::fetch::NpmMetadata) -> BTreeMap<Version, String> {
     let mut map = BTreeMap::new();
-    for (_k, v) in &meta.versions {
+    for v in meta.versions.values() {
         if let Ok(ver) = Version::parse(&v.version) {
             map.insert(ver, v.dist.tarball.clone());
         }
@@ -93,7 +99,7 @@ pub fn canonicalize_npm_range(input: &str) -> String {
 
     // If it parses as a full semver (including prerelease/build), treat as exact
     if semver::Version::parse(s).is_ok() {
-        return format!("={}", s);
+        return format!("={s}");
     }
 
     // Hyphen range: "1.2.3 - 2.3.4" => ">=1.2.3, <=2.3.4"
@@ -119,7 +125,7 @@ pub fn canonicalize_npm_range(input: &str) -> String {
             let next = tokens.get(i + 1).copied();
             if is_op(t) {
                 if let Some(ver) = next {
-                    comps.push(format!("{}{}", t, ver));
+                    comps.push(format!("{t}{ver}"));
                     i += 2;
                     continue;
                 }
@@ -134,7 +140,7 @@ pub fn canonicalize_npm_range(input: &str) -> String {
                 }
                 // Bare major / major.minor expansions handled below
                 if is_numeric(t) {
-                    return format!("^{}.0.0", t);
+                    return format!("^{t}.0.0");
                 }
                 if count_dots(t) == 1 && t.chars().all(|c| c.is_ascii_digit() || c == '.') {
                     // major.minor
@@ -147,7 +153,7 @@ pub fn canonicalize_npm_range(input: &str) -> String {
                         return format!(">={maj}.{min}.0, <{maj}.{}.0", min_i + 1);
                     }
                 }
-                comps.push(format!("={}", t));
+                comps.push(format!("={t}"));
                 i += 1;
                 continue;
             }
@@ -162,7 +168,7 @@ pub fn canonicalize_npm_range(input: &str) -> String {
 
     // Fallback expansions for simple patterns
     if is_numeric(s) {
-        return format!("^{}.0.0", s);
+        return format!("^{s}.0.0");
     }
     if s.ends_with(".x") || s.ends_with(".*") {
         return expand_wildcard(s);
@@ -214,28 +220,4 @@ fn expand_wildcard(pattern: &str) -> String {
     }
     // Fallback return original
     pattern.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_basic_wildcards() {
-        assert_eq!(canonicalize_npm_range("*"), "*");
-        assert_eq!(
-            canonicalize_npm_range("1.x"),
-            ">=1.0.0, <2.0.0".replace("  ", " ")
-        );
-        assert_eq!(canonicalize_npm_range("1.2.x"), ">=1.2.0, <1.3.0");
-    }
-    #[test]
-    fn test_hyphen() {
-        assert_eq!(canonicalize_npm_range("1.2.3 - 2.3.4"), ">=1.2.3, <=2.3.4");
-    }
-    #[test]
-    fn test_spaced_comparators() {
-        let c = canonicalize_npm_range(">= 2.1.2 < 3.0.0");
-        // Accept either comma separated comparators or if fallback produced original.
-        assert!(c.contains(">=2.1.2") && c.contains("<3.0.0"));
-    }
 }

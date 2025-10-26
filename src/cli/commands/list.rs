@@ -11,19 +11,11 @@ pub fn cmd_list() -> Result<()> {
         let legacy = PathBuf::from("pacm-lock.json");
         if legacy.exists() {
             let lf = lockfile::load_json_compat(&legacy)?;
-            println!(
-                "{gray}[pacm]{reset} {yellow}note{reset}: reading legacy pacm-lock.json (run 'pacm install' to migrate)",
-                gray = C_GRAY,
-                yellow = C_YELLOW,
-                reset = C_RESET
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_YELLOW}note{C_RESET}: reading legacy pacm-lock.json (run 'pacm install' to migrate)");
             lf
         } else {
             println!(
-                "{gray}[pacm]{reset} {red}error{reset} no lockfile. Run 'pacm install'.",
-                gray = C_GRAY,
-                red = C_RED,
-                reset = C_RESET
+                "{C_GRAY}[pacm]{C_RESET} {C_RED}error{C_RESET} no lockfile. Run 'pacm install'."
             );
             return Ok(());
         }

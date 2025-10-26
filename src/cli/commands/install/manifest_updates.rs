@@ -1,12 +1,11 @@
 use crate::fetch::Fetcher;
 use crate::manifest::{self, Manifest};
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 
 pub(super) fn update_manifest_for_specs(
     specs: &[String],
     manifest: &mut Manifest,
-    manifest_path: &PathBuf,
+    manifest_path: &std::path::Path,
     dev: bool,
     optional: bool,
     no_save: bool,
@@ -46,7 +45,7 @@ pub(super) fn update_manifest_for_specs(
     Ok(())
 }
 
-pub(super) fn parse_spec(spec: &str) -> (String, String) {
+pub fn parse_spec(spec: &str) -> (String, String) {
     if spec.starts_with('@') {
         if let Some(idx) = spec.rfind('@') {
             if idx == 0 {
@@ -90,50 +89,17 @@ fn resolve_version_for_manifest(
         if req_trimmed.eq_ignore_ascii_case("latest") || req_trimmed == "*" {
             let meta = fetcher
                 .package_version_metadata(name, "latest")
-                .with_context(|| format!("fetch metadata for {}", name))?;
+                .with_context(|| format!("fetch metadata for {name}"))?;
             Ok(meta.version)
         } else if crate::cli::commands::install::util::looks_like_dist_tag(req_trimmed) {
             let meta = fetcher
                 .package_version_metadata(name, req_trimmed)
-                .with_context(|| format!("fetch metadata for {}", name))?;
+                .with_context(|| format!("fetch metadata for {name}"))?;
             Ok(meta.version)
         } else {
             Ok(req_trimmed.to_string())
         }
     } else {
         Ok(req_trimmed.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_spec;
-
-    #[test]
-    fn parses_scoped_with_range() {
-        let (name, range) = parse_spec("@scope/pkg@^1.2.3");
-        assert_eq!(name, "@scope/pkg");
-        assert_eq!(range, "^1.2.3");
-    }
-
-    #[test]
-    fn parses_scoped_without_range() {
-        let (name, range) = parse_spec("@scope/pkg");
-        assert_eq!(name, "@scope/pkg");
-        assert_eq!(range, "*");
-    }
-
-    #[test]
-    fn parses_unscoped_with_range() {
-        let (name, range) = parse_spec("lodash@^4.17.0");
-        assert_eq!(name, "lodash");
-        assert_eq!(range, "^4.17.0");
-    }
-
-    #[test]
-    fn parses_unscoped_without_range() {
-        let (name, range) = parse_spec("lodash");
-        assert_eq!(name, "lodash");
-        assert_eq!(range, "*");
     }
 }

@@ -110,7 +110,7 @@ impl Lockfile {
         };
         // Ensure an entry exists for every declared package (dependencies, dev, optional)
         for name in declared {
-            let key = format!("node_modules/{}", name);
+            let key = format!("node_modules/{name}");
             self.packages.entry(key).or_insert(PackageEntry {
                 version: None,
                 integrity: None,
@@ -128,7 +128,7 @@ impl Lockfile {
 }
 
 const MAX_LOCKFILE_SIZE: usize = 16 * 1024 * 1024;
-const LOCKFILE_MAGIC: &[u8; 8] = b"PACMLOCK";
+pub const LOCKFILE_MAGIC: &[u8; 8] = b"PACMLOCK";
 const CURRENT_WIRE_VERSION: u16 = 2;
 
 fn write_u16(buf: &mut Vec<u8>, value: u16) {
@@ -188,7 +188,7 @@ fn write_string_list(buf: &mut Vec<u8>, list: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn encode_current_binary(lf: &Lockfile) -> Result<Vec<u8>> {
+pub fn encode_current_binary(lf: &Lockfile) -> Result<Vec<u8>> {
     let mut packages_buf = Vec::with_capacity(4096);
     write_len(&mut packages_buf, lf.packages.len(), "package count")?;
     for (name, entry) in &lf.packages {
@@ -379,7 +379,7 @@ fn parse_packages_section(
     Ok(packages)
 }
 
-fn decode_current_binary(data: &[u8]) -> anyhow::Result<Lockfile> {
+pub fn decode_current_binary(data: &[u8]) -> anyhow::Result<Lockfile> {
     ensure!(
         data.len() <= MAX_LOCKFILE_SIZE,
         "lockfile exceeds maximum size"
@@ -719,41 +719,5 @@ impl From<LegacyLockfile> for Lockfile {
             format: old.format,
             packages,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn encode_decode_roundtrip() {
-        let mut lf = Lockfile::default();
-        lf.format = 7;
-        let mut entry = PackageEntry {
-            version: Some("1.2.3".to_string()),
-            integrity: Some("sha512-deadbeef".to_string()),
-            resolved: Some("https://registry.example/pkg".to_string()),
-            dependencies: BTreeMap::from([(String::from("dep"), String::from("^1.0.0"))]),
-            dev_dependencies: BTreeMap::from([(String::from("dev"), String::from("~2.0.0"))]),
-            optional_dependencies: BTreeMap::from([(String::from("opt"), String::from("3.0.0"))]),
-            peer_dependencies: BTreeMap::from([(String::from("peer"), String::from(">=4"))]),
-            peer_dependencies_meta: BTreeMap::from([(
-                String::from("peer"),
-                PeerMeta { optional: true },
-            )]),
-            os: vec![String::from("linux")],
-            cpu_arch: vec![String::from("x64")],
-        };
-        lf.packages.insert(String::from(""), entry.clone());
-        entry.version = Some("0.0.1".into());
-        lf.packages.insert(String::from("node_modules/dep"), entry);
-
-        let encoded = encode_current_binary(&lf).expect("encode");
-        assert!(encoded.starts_with(LOCKFILE_MAGIC));
-
-        let decoded = decode_current_binary(&encoded).expect("decode");
-        assert_eq!(lf, decoded);
     }
 }

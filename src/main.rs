@@ -6,7 +6,7 @@ use std::process::Command;
 
 fn main() {
     if let Err(e) = real_main() {
-        eprintln!("pacm error: {:#}", e);
+        eprintln!("pacm error: {e:#}");
         std::process::exit(1);
     }
 }

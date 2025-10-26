@@ -1,0 +1,45 @@
+name: Question
+description: Ask a question about pacm
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question about pacm? Ask away! Please check our documentation first.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What would you like to know?
+      placeholder: "Please provide a clear and concise question."
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Provide any additional context that might help us answer your question.
+      placeholder: "What are you trying to accomplish? What have you tried so far?"
+
+  - type: input
+    id: pacm-version
+    attributes:
+      label: Pacm Version
+      description: What version of pacm are you using? (if applicable)
+      placeholder: "e.g., 0.1.0"
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: What category does your question fall into?
+      options:
+        - Usage/Installation
+        - Development/Contributing
+        - Architecture/Design
+        - Performance
+        - Security
+        - Other

@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn ensure_lock_entry<'a>(lock: &'a mut Lockfile, name: &str) -> &'a mut PackageEntry {
-    let key = format!("node_modules/{}", name);
+    let key = format!("node_modules/{name}");
     lock.packages.entry(key).or_insert(PackageEntry {
         version: None,
         integrity: None,
@@ -37,6 +37,7 @@ fn ensure_lock_entry<'a>(lock: &'a mut Lockfile, name: &str) -> &'a mut PackageE
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_lock_entry(
     lock: &mut Lockfile,
     name: &str,
@@ -73,12 +74,7 @@ pub(crate) fn cmd_install(
 ) -> Result<()> {
     let manifest_path = PathBuf::from("package.json");
     if !manifest_path.exists() {
-        println!(
-            "{gray}[pacm]{reset} {red}error{reset} no package.json found. Run 'pacm init' first.",
-            gray = C_GRAY,
-            red = C_RED,
-            reset = C_RESET
-        );
+        println!("{C_GRAY}[pacm]{C_RESET} {C_RED}error{C_RESET} no package.json found. Run 'pacm init' first.");
         return Ok(());
     }
     let mut manifest = manifest::load(&manifest_path)?;
@@ -100,11 +96,7 @@ pub(crate) fn cmd_install(
         if legacy.exists() {
             let lf = lockfile::load_json_compat(&legacy)?;
             lockfile::write(&lf, lock_path.clone())?;
-            println!(
-                "{gray}[pacm]{reset} migrated lockfile to binary: pacm.lockb",
-                gray = C_GRAY,
-                reset = C_RESET
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} migrated lockfile to binary: pacm.lockb");
             lf
         } else {
             Lockfile::default()
@@ -147,24 +139,9 @@ pub(crate) fn cmd_install(
         && removed_root.is_empty()
         && node_modules_intact(&manifest)
     {
-        println!(
-            "{gray}[pacm]{reset} {dim}no dependency changes{reset}",
-            gray = C_GRAY,
-            dim = C_DIM,
-            reset = C_RESET
-        );
-        println!(
-            "{gray}[pacm]{reset} {dim}0 added, 0 removed{reset}",
-            gray = C_GRAY,
-            dim = C_DIM,
-            reset = C_RESET
-        );
-        println!(
-            "{gray}[pacm]{reset} {green}already up to date{reset}",
-            gray = C_GRAY,
-            green = C_GREEN,
-            reset = C_RESET
-        );
+        println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
+        println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}0 added, 0 removed{C_RESET}");
+        println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}already up to date{C_RESET}");
         return Ok(());
     }
 
@@ -206,35 +183,17 @@ pub(crate) fn cmd_install(
             cleanup_empty_node_modules_dir();
             let dur = start.elapsed();
             if added_root.is_empty() && removed_root.is_empty() {
-                println!(
-                    "{gray}[pacm]{reset} {dim}no dependency changes{reset}",
-                    gray = C_GRAY,
-                    dim = C_DIM,
-                    reset = C_RESET
-                );
+                println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
             }
             for r in &removed_root {
                 if let Some(ver) = original_lock
                     .packages
-                    .get(&format!("node_modules/{}", r))
+                    .get(&format!("node_modules/{r}"))
                     .and_then(|e| e.version.as_ref())
                 {
-                    println!(
-                        "{gray}[pacm]{reset} {red}-{reset} {name}@{ver}",
-                        gray = C_GRAY,
-                        red = C_RED,
-                        reset = C_RESET,
-                        name = r,
-                        ver = ver
-                    );
+                    println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}@{ver}");
                 } else {
-                    println!(
-                        "{gray}[pacm]{reset} {red}-{reset} {name}",
-                        gray = C_GRAY,
-                        red = C_RED,
-                        reset = C_RESET,
-                        name = r
-                    );
+                    println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}");
                 }
             }
             let total = as_hash.len();
@@ -246,14 +205,7 @@ pub(crate) fn cmd_install(
                 removed = removed_root.len(),
                 reset = C_RESET
             );
-            println!(
-                "{gray}[pacm]{reset} {green}linked{reset} {total} packages (all cached) in {duration:.2?}",
-                gray = C_GRAY,
-                green = C_GREEN,
-                reset = C_RESET,
-                total = total,
-                duration = dur
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}linked{C_RESET} {total} packages (all cached) in {dur:.2?}");
             return Ok(());
         }
     }
@@ -422,11 +374,11 @@ pub(crate) fn cmd_install(
                 }
                 let meta = fetcher
                     .package_metadata(&name)
-                    .with_context(|| format!("fetch metadata for {}", name))?;
+                    .with_context(|| format!("fetch metadata for {name}"))?;
                 if let Some(tags) = &meta.dist_tags {
                     if let Some(ver_s) = tags.get(&range) {
                         let ver = semver::Version::parse(ver_s).with_context(|| {
-                            format!("invalid version '{}' for tag '{}'", ver_s, range)
+                            format!("invalid version '{ver_s}' for tag '{range}'")
                         })?;
                         let tar = meta
                             .versions
@@ -466,7 +418,7 @@ pub(crate) fn cmd_install(
                 }
                 let meta = fetcher
                     .package_metadata(&name)
-                    .with_context(|| format!("fetch metadata for {}", name))?;
+                    .with_context(|| format!("fetch metadata for {name}"))?;
                 if range.eq_ignore_ascii_case("latest") {
                     if let Some(tags) = &meta.dist_tags {
                         if let Some(ver_s) = tags.get("latest") {
@@ -500,7 +452,7 @@ pub(crate) fn cmd_install(
                         let mut pr = progress.lock().unwrap();
                         pr.render(format_status(
                             "fast",
-                            &format!("skip optional {} (resolve failed)", name),
+                            &format!("skip optional {name} (resolve failed)"),
                         ));
                     }
                     continue;
@@ -516,6 +468,7 @@ pub(crate) fn cmd_install(
 
         let mut package_os: Vec<String> = Vec::new();
         let mut package_cpu: Vec<String> = Vec::new();
+        #[allow(clippy::type_complexity)]
         let (integrity_owned, dep_map, opt_map, peer_map, peer_meta_map, resolved_url): (
             Option<String>,
             BTreeMap<String, String>,
@@ -537,7 +490,7 @@ pub(crate) fn cmd_install(
                             .filter(|(n, _)| {
                                 if let Some(ver) = lock
                                     .packages
-                                    .get(&format!("node_modules/{}", n))
+                                    .get(&format!("node_modules/{n}"))
                                     .and_then(|e| e.version.clone())
                                 {
                                     if let Ok(m) = crate::cache::read_cached_manifest(n, &ver) {
@@ -581,7 +534,7 @@ pub(crate) fn cmd_install(
         } else {
             let meta2 = match fetcher
                 .package_metadata(&name)
-                .with_context(|| format!("fetch metadata for {}", name))
+                .with_context(|| format!("fetch metadata for {name}"))
             {
                 Ok(m) => m,
                 Err(e) => {
@@ -797,7 +750,7 @@ pub(crate) fn cmd_install(
                 continue;
             }
             if let Some(pkg_name) = k.strip_prefix("node_modules/") {
-                for (peer, _range) in &entry.peer_dependencies {
+                for peer in entry.peer_dependencies.keys() {
                     let is_optional = entry
                         .peer_dependencies_meta
                         .get(peer)
@@ -807,14 +760,7 @@ pub(crate) fn cmd_install(
                         continue;
                     }
                     if !installed.contains(peer) {
-                        println!(
-                            "{gray}[pacm]{reset} {yellow}warning{reset} missing peer for {pkg}: requires {peer}",
-                            gray = C_GRAY,
-                            yellow = C_YELLOW,
-                            reset = C_RESET,
-                            pkg = pkg_name,
-                            peer = peer
-                        );
+                        println!("{C_GRAY}[pacm]{C_RESET} {C_YELLOW}warning{C_RESET} missing peer for {pkg_name}: requires {peer}");
                     }
                 }
             }
@@ -863,55 +809,27 @@ pub(crate) fn cmd_install(
     let reused = total.saturating_sub(installed_count);
 
     if added_root.is_empty() && removed_root.is_empty() {
-        println!(
-            "{gray}[pacm]{reset} {dim}no dependency changes{reset}",
-            gray = C_GRAY,
-            dim = C_DIM,
-            reset = C_RESET
-        );
+        println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
     }
     for a in &added_root {
         if let Some(inst) = instances.get(a) {
             println!(
-                "{gray}[pacm]{reset} {green}+{reset} {name}@{ver}",
-                gray = C_GRAY,
-                green = C_GREEN,
-                reset = C_RESET,
-                name = a,
-                ver = inst.version
+                "{C_GRAY}[pacm]{C_RESET} {C_GREEN}+{C_RESET} {}@{}",
+                a, inst.version
             );
         } else {
-            println!(
-                "{gray}[pacm]{reset} {green}+{reset} {name}",
-                gray = C_GRAY,
-                green = C_GREEN,
-                reset = C_RESET,
-                name = a
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}+{C_RESET} {a}");
         }
     }
     for r in &removed_root {
         if let Some(ver) = original_lock
             .packages
-            .get(&format!("node_modules/{}", r))
+            .get(&format!("node_modules/{r}"))
             .and_then(|e| e.version.as_ref())
         {
-            println!(
-                "{gray}[pacm]{reset} {red}-{reset} {name}@{ver}",
-                gray = C_GRAY,
-                red = C_RED,
-                reset = C_RESET,
-                name = r,
-                ver = ver
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}@{ver}");
         } else {
-            println!(
-                "{gray}[pacm]{reset} {red}-{reset} {name}",
-                gray = C_GRAY,
-                red = C_RED,
-                reset = C_RESET,
-                name = r
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}");
         }
     }
     println!(
@@ -923,16 +841,6 @@ pub(crate) fn cmd_install(
         removed = removed_root.len(),
         reset = C_RESET
     );
-    println!(
-        "{gray}[pacm]{reset} {green}installed{reset} {total} packages ({green}{downloaded} downloaded{reset}, {dim}{reused_count} reused{reset}) in {duration:.2?}",
-        gray = C_GRAY,
-        green = C_GREEN,
-        dim = C_DIM,
-        reset = C_RESET,
-        total = total,
-        downloaded = installed_count,
-        reused_count = reused,
-        duration = dur
-    );
+    println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}installed{C_RESET} {total} packages ({C_GREEN}{installed_count} downloaded{C_RESET}, {C_DIM}{reused} reused{C_RESET}) in {dur:.2?}");
     Ok(())
 }

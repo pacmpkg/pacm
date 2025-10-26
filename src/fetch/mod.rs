@@ -36,11 +36,11 @@ impl Fetcher {
         if let Some(hit) = META_CACHE.lock().unwrap().get(name).cloned() {
             return Ok(hit);
         }
-        let url = format!("{}/{}", self.registry, name.to_string());
+        let url = format!("{}/{}", self.registry, name);
         let resp = CLIENT
             .get(&url)
             .send()
-            .with_context(|| format!("GET {}", url))?;
+            .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("registry returned {} for {}", resp.status(), name);
         }
@@ -54,7 +54,7 @@ impl Fetcher {
 
     pub fn package_version_metadata(&self, name: &str, spec: &str) -> Result<NpmVersion> {
         let trimmed = spec.trim();
-        let key = format!("{}@{}", name, trimmed);
+        let key = format!("{name}@{trimmed}");
         if let Some(hit) = VERSION_META_CACHE.lock().unwrap().get(&key).cloned() {
             return Ok(hit);
         }
@@ -62,7 +62,7 @@ impl Fetcher {
         let resp = CLIENT
             .get(&url)
             .send()
-            .with_context(|| format!("GET {}", url))?;
+            .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "registry returned {} for {}@{}",
@@ -80,7 +80,7 @@ impl Fetcher {
         let resp = CLIENT
             .get(url)
             .send()
-            .with_context(|| format!("GET {}", url))?;
+            .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("tarball fetch {} status {}", url, resp.status());
         }
@@ -97,7 +97,7 @@ impl Fetcher {
         let mut resp = CLIENT
             .get(url)
             .send()
-            .with_context(|| format!("GET {}", url))?;
+            .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("tarball fetch {} status {}", url, resp.status());
         }
