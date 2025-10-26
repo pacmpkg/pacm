@@ -171,6 +171,7 @@ fn normalize_pkg_path(base: &Path, rel: &str) -> PathBuf {
     p
 }
 
+#[cfg(windows)]
 fn write_windows_exe_shim(dest_exe: &Path, relative_target: &Path) -> Result<()> {
     // Copy current pacm.exe as a generic shim and write a sidecar with target path.
     let pacm_exe = std::env::current_exe().with_context(|| "locate pacm executable")?;

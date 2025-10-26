@@ -1,11 +1,12 @@
 <div align="center">
 
-# 🏗️ Pacm
+<img src="assets/avatar-no-bg.png" alt="Pacm Logo" width="248" height="248"/>
 
 *Fast, disk-efficient, secure JavaScript/TypeScript package manager (prototype)*
 
 [![License: ICL-1.0](https://img.shields.io/badge/License-ICL--1.0-blue.svg)](https://github.com/pacmpkg/pacm/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange)](https://www.rust-lang.org/)
+[![CI](https://github.com/pacmpkg/pacm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pacmpkg/pacm/actions/workflows/ci.yml)
 
 </div>
 
