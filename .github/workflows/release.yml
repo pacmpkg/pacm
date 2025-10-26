@@ -83,7 +83,7 @@ jobs:
       run: echo "content<<EOF" >> $GITHUB_OUTPUT && cat CHANGELOG.md >> $GITHUB_OUTPUT && echo "EOF" >> $GITHUB_OUTPUT
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: release-files/*
         body: ${{ steps.changelog.outputs.content }}
