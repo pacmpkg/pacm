@@ -3,14 +3,5 @@
   "version": "0.1.0",
   "dependencies": {
     "acorn": "8.15.0"
-  },
-  "devDependencies": {
-    "typescript": "5.9.3"
-  },
-  "optionalDependencies": {
-    "fsevents": "2.3.3"
-  },
-  "peerDependencies": {
-    "react-dom": "18.2.0"
   }
 }

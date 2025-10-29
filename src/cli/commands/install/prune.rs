@@ -102,11 +102,8 @@ fn enqueue_root(entry: &PackageEntry, queue: &mut std::collections::VecDeque<Str
         queue.push_back(name.clone());
     }
     for peer in entry.peer_dependencies.keys() {
-        let is_optional = entry
-            .peer_dependencies_meta
-            .get(peer)
-            .map(|meta| meta.optional)
-            .unwrap_or(false);
+        let is_optional =
+            entry.peer_dependencies_meta.get(peer).map(|meta| meta.optional).unwrap_or(false);
         if !is_optional {
             queue.push_back(peer.clone());
         }
@@ -121,11 +118,8 @@ fn enqueue_entry(entry: &PackageEntry, queue: &mut std::collections::VecDeque<St
         queue.push_back(dep.clone());
     }
     for peer in entry.peer_dependencies.keys() {
-        let is_optional = entry
-            .peer_dependencies_meta
-            .get(peer)
-            .map(|meta| meta.optional)
-            .unwrap_or(false);
+        let is_optional =
+            entry.peer_dependencies_meta.get(peer).map(|meta| meta.optional).unwrap_or(false);
         if !is_optional {
             queue.push_back(peer.clone());
         }

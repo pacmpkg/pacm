@@ -9,7 +9,7 @@ use std::time::Duration;
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("pacm/0.1.0 (+https://github.com/infinitejs/pacm)")
+        .user_agent("pacm/0.1.0 (+https://github.com/pacmpkg/pacm)")
         .build()
         .expect("http client")
 });
@@ -27,9 +27,7 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new(registry: Option<String>) -> Result<Self> {
-        Ok(Self {
-            registry: registry.unwrap_or_else(|| "https://registry.npmjs.org".into()),
-        })
+        Ok(Self { registry: registry.unwrap_or_else(|| "https://registry.npmjs.org".into()) })
     }
 
     pub fn package_metadata(&self, name: &str) -> Result<NpmMetadata> {
@@ -37,18 +35,12 @@ impl Fetcher {
             return Ok(hit);
         }
         let url = format!("{}/{}", self.registry, name);
-        let resp = CLIENT
-            .get(&url)
-            .send()
-            .with_context(|| format!("GET {url}"))?;
+        let resp = CLIENT.get(&url).send().with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("registry returned {} for {}", resp.status(), name);
         }
         let meta: NpmMetadata = resp.json()?;
-        META_CACHE
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), meta.clone());
+        META_CACHE.lock().unwrap().insert(name.to_string(), meta.clone());
         Ok(meta)
     }
 
@@ -59,17 +51,9 @@ impl Fetcher {
             return Ok(hit);
         }
         let url = format!("{}/{}/{}", self.registry, name, trimmed);
-        let resp = CLIENT
-            .get(&url)
-            .send()
-            .with_context(|| format!("GET {url}"))?;
+        let resp = CLIENT.get(&url).send().with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
-            anyhow::bail!(
-                "registry returned {} for {}@{}",
-                resp.status(),
-                name,
-                trimmed
-            );
+            anyhow::bail!("registry returned {} for {}@{}", resp.status(), name, trimmed);
         }
         let meta: NpmVersion = resp.json()?;
         VERSION_META_CACHE.lock().unwrap().insert(key, meta.clone());
@@ -77,10 +61,7 @@ impl Fetcher {
     }
 
     pub fn download_tarball(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = CLIENT
-            .get(url)
-            .send()
-            .with_context(|| format!("GET {url}"))?;
+        let resp = CLIENT.get(url).send().with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("tarball fetch {} status {}", url, resp.status());
         }
@@ -94,10 +75,7 @@ impl Fetcher {
         F: FnMut(u64, Option<u64>),
     {
         use std::io::Read;
-        let mut resp = CLIENT
-            .get(url)
-            .send()
-            .with_context(|| format!("GET {url}"))?;
+        let mut resp = CLIENT.get(url).send().with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("tarball fetch {} status {}", url, resp.status());
         }

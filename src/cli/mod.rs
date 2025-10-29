@@ -44,6 +44,10 @@ pub enum Commands {
         prefer_offline: bool,
         #[arg(long)]
         no_progress: bool,
+        #[arg(long)]
+        link: bool,
+        #[arg(long)]
+        copy: bool,
     },
     /// Alias for install <pkg>
     Add {
@@ -56,6 +60,10 @@ pub enum Commands {
         no_save: bool,
         #[arg(long)]
         exact: bool,
+        #[arg(long)]
+        link: bool,
+        #[arg(long)]
+        copy: bool,
     },
     List,
     Cache {
@@ -110,30 +118,36 @@ impl PacmCli {
                 exact,
                 prefer_offline,
                 no_progress,
+                link,
+                copy,
             }) => commands::cmd_install(
                 packages.clone(),
-                *dev,
-                *optional,
-                *no_save,
-                *exact,
-                *prefer_offline,
-                *no_progress,
+                commands::InstallOptions {
+                    dev: *dev,
+                    optional: *optional,
+                    no_save: *no_save,
+                    exact: *exact,
+                    prefer_offline: *prefer_offline,
+                    no_progress: *no_progress,
+                    link: *link,
+                    copy: *copy,
+                },
             ),
-            Some(Commands::Add {
-                package,
-                dev,
-                optional,
-                no_save,
-                exact,
-            }) => commands::cmd_install(
-                vec![package.clone()],
-                *dev,
-                *optional,
-                *no_save,
-                *exact,
-                false,
-                false,
-            ),
+            Some(Commands::Add { package, dev, optional, no_save, exact, link, copy }) => {
+                commands::cmd_install(
+                    vec![package.clone()],
+                    commands::InstallOptions {
+                        dev: *dev,
+                        optional: *optional,
+                        no_save: *no_save,
+                        exact: *exact,
+                        prefer_offline: false,
+                        no_progress: false,
+                        link: *link,
+                        copy: *copy,
+                    },
+                )
+            }
             Some(Commands::Remove { packages }) => commands::cmd_remove(packages.clone()),
             Some(Commands::List) => commands::cmd_list(),
             Some(Commands::Cache { cmd }) => match cmd {

@@ -14,11 +14,7 @@ pub(super) fn update_manifest_for_specs(
         return Ok(());
     }
 
-    let fetcher = if no_save {
-        None
-    } else {
-        Some(Fetcher::new(None)?)
-    };
+    let fetcher = if no_save { None } else { Some(Fetcher::new(None)?) };
 
     for spec in specs {
         let (name, req) = parse_spec(spec);
@@ -77,9 +73,8 @@ fn resolve_version_for_manifest(
     } else if let Ok(range) =
         semver::VersionReq::parse(&crate::resolver::canonicalize_npm_range(req_trimmed))
     {
-        if let Some(version) = cached_versions
-            .into_iter()
-            .find(|candidate| range.matches(candidate))
+        if let Some(version) =
+            cached_versions.into_iter().find(|candidate| range.matches(candidate))
         {
             return Ok(version.to_string());
         }

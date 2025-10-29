@@ -1,4 +1,4 @@
-pub(crate) use install_command::cmd_install;
+pub(crate) use install_command::{cmd_install, InstallOptions};
 
 pub(crate) use fast::build_fast_instances;
 pub(crate) use prune::{
@@ -6,7 +6,6 @@ pub(crate) use prune::{
     prune_unreachable, remove_dirs,
 };
 
-mod download;
 mod fast;
 mod install_command;
 pub mod manifest_updates;

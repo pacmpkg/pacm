@@ -22,34 +22,26 @@ pub struct PackageEntry {
     pub resolved: Option<String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "devDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "devDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub dev_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "optionalDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "optionalDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub optional_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "peerDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "peerDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "peerDependenciesMeta",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "peerDependenciesMeta", skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_dependencies_meta: BTreeMap<String, PeerMeta>,
     #[serde(default)]
     pub os: Vec<String>,
     #[serde(default, rename = "cpu")]
     pub cpu_arch: Vec<String>,
+    #[serde(default, rename = "storeKey")]
+    pub store_key: Option<String>,
+    #[serde(default, rename = "contentHash")]
+    pub content_hash: Option<String>,
+    #[serde(default, rename = "linkMode")]
+    pub link_mode: Option<String>,
+    #[serde(default, rename = "storePath")]
+    pub store_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -61,10 +53,7 @@ pub struct Lockfile {
 
 impl Default for Lockfile {
     fn default() -> Self {
-        Self {
-            format: 1,
-            packages: BTreeMap::new(),
-        }
+        Self { format: 1, packages: BTreeMap::new() }
     }
 }
 
@@ -89,6 +78,10 @@ impl Lockfile {
             peer_dependencies_meta: BTreeMap::new(),
             os: Vec::new(),
             cpu_arch: Vec::new(),
+            store_key: None,
+            content_hash: None,
+            link_mode: None,
+            store_path: None,
         });
         root.version = Some(manifest.version.clone());
         // Persist each root section separately
@@ -122,6 +115,10 @@ impl Lockfile {
                 peer_dependencies_meta: BTreeMap::new(),
                 os: Vec::new(),
                 cpu_arch: Vec::new(),
+                store_key: None,
+                content_hash: None,
+                link_mode: None,
+                store_path: None,
             });
         }
     }
@@ -129,7 +126,7 @@ impl Lockfile {
 
 const MAX_LOCKFILE_SIZE: usize = 16 * 1024 * 1024;
 pub const LOCKFILE_MAGIC: &[u8; 8] = b"PACMLOCK";
-const CURRENT_WIRE_VERSION: u16 = 2;
+const CURRENT_WIRE_VERSION: u16 = 3;
 
 fn write_u16(buf: &mut Vec<u8>, value: u16) {
     buf.extend_from_slice(&value.to_le_bytes());
@@ -203,12 +200,13 @@ pub fn encode_current_binary(lf: &Lockfile) -> Result<Vec<u8>> {
         write_peer_meta_map(&mut packages_buf, &entry.peer_dependencies_meta)?;
         write_string_list(&mut packages_buf, &entry.os)?;
         write_string_list(&mut packages_buf, &entry.cpu_arch)?;
+        write_option_string(&mut packages_buf, &entry.store_key)?;
+        write_option_string(&mut packages_buf, &entry.content_hash)?;
+        write_option_string(&mut packages_buf, &entry.link_mode)?;
+        write_option_string(&mut packages_buf, &entry.store_path)?;
     }
 
-    ensure!(
-        packages_buf.len() <= MAX_LOCKFILE_SIZE,
-        "lockfile data exceeds limit"
-    );
+    ensure!(packages_buf.len() <= MAX_LOCKFILE_SIZE, "lockfile data exceeds limit");
 
     let mut buf = Vec::with_capacity(LOCKFILE_MAGIC.len() + 16 + packages_buf.len());
     buf.extend_from_slice(LOCKFILE_MAGIC);
@@ -218,31 +216,20 @@ pub fn encode_current_binary(lf: &Lockfile) -> Result<Vec<u8>> {
     write_len(&mut buf, packages_buf.len(), "packages section")?;
     buf.extend_from_slice(&packages_buf);
     write_u32(&mut buf, 0); // reserved (extra section length)
-    ensure!(
-        buf.len() <= MAX_LOCKFILE_SIZE,
-        "lockfile data exceeds limit"
-    );
+    ensure!(buf.len() <= MAX_LOCKFILE_SIZE, "lockfile data exceeds limit");
     Ok(buf)
 }
 
 fn read_u16(data: &[u8], pos: &mut usize) -> anyhow::Result<u16> {
-    let end = pos
-        .checked_add(2)
-        .ok_or_else(|| anyhow!("overflow reading u16"))?;
-    let slice = data
-        .get(*pos..end)
-        .ok_or_else(|| anyhow!("unexpected eof reading u16"))?;
+    let end = pos.checked_add(2).ok_or_else(|| anyhow!("overflow reading u16"))?;
+    let slice = data.get(*pos..end).ok_or_else(|| anyhow!("unexpected eof reading u16"))?;
     *pos = end;
     Ok(u16::from_le_bytes([slice[0], slice[1]]))
 }
 
 fn read_u32(data: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
-    let end = pos
-        .checked_add(4)
-        .ok_or_else(|| anyhow!("overflow reading u32"))?;
-    let slice = data
-        .get(*pos..end)
-        .ok_or_else(|| anyhow!("unexpected eof reading u32"))?;
+    let end = pos.checked_add(4).ok_or_else(|| anyhow!("overflow reading u32"))?;
+    let slice = data.get(*pos..end).ok_or_else(|| anyhow!("unexpected eof reading u32"))?;
     *pos = end;
     Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
@@ -258,12 +245,8 @@ fn read_exact<'a>(
     len: usize,
     what: &str,
 ) -> anyhow::Result<&'a [u8]> {
-    let end = pos
-        .checked_add(len)
-        .ok_or_else(|| anyhow!("length overflow reading {what}"))?;
-    let slice = data
-        .get(*pos..end)
-        .ok_or_else(|| anyhow!("unexpected eof reading {what}"))?;
+    let end = pos.checked_add(len).ok_or_else(|| anyhow!("length overflow reading {what}"))?;
+    let slice = data.get(*pos..end).ok_or_else(|| anyhow!("unexpected eof reading {what}"))?;
     *pos = end;
     Ok(slice)
 }
@@ -355,6 +338,15 @@ fn parse_packages_section(
         } else {
             (Vec::new(), Vec::new())
         };
+        let (store_key, content_hash, link_mode, store_path) = if wire_version >= 3 {
+            let store_key = read_option_string(packages_slice, &mut packages_pos)?;
+            let content_hash = read_option_string(packages_slice, &mut packages_pos)?;
+            let link_mode = read_option_string(packages_slice, &mut packages_pos)?;
+            let store_path = read_option_string(packages_slice, &mut packages_pos)?;
+            (store_key, content_hash, link_mode, store_path)
+        } else {
+            (None, None, None, None)
+        };
 
         let entry = PackageEntry {
             version,
@@ -367,31 +359,26 @@ fn parse_packages_section(
             peer_dependencies_meta,
             os,
             cpu_arch,
+            store_key,
+            content_hash,
+            link_mode,
+            store_path,
         };
         packages.insert(key, entry);
     }
 
-    ensure!(
-        packages_pos == packages_slice.len(),
-        "unexpected trailing data in packages section"
-    );
+    ensure!(packages_pos == packages_slice.len(), "unexpected trailing data in packages section");
 
     Ok(packages)
 }
 
 pub fn decode_current_binary(data: &[u8]) -> anyhow::Result<Lockfile> {
-    ensure!(
-        data.len() <= MAX_LOCKFILE_SIZE,
-        "lockfile exceeds maximum size"
-    );
-    ensure!(
-        data.starts_with(LOCKFILE_MAGIC),
-        "missing lockfile magic header"
-    );
+    ensure!(data.len() <= MAX_LOCKFILE_SIZE, "lockfile exceeds maximum size");
+    ensure!(data.starts_with(LOCKFILE_MAGIC), "missing lockfile magic header");
 
     let mut pos = LOCKFILE_MAGIC.len();
     let version = read_u16(data, &mut pos)?;
-    if version != CURRENT_WIRE_VERSION && version != 1 {
+    if version != CURRENT_WIRE_VERSION && version != 2 && version != 1 {
         bail!("unsupported lockfile wire version {version}");
     }
 
@@ -474,9 +461,8 @@ fn decode_manual_legacy(data: &[u8]) -> anyhow::Result<Lockfile> {
         let mut value: u64 = 0;
         let mut shift = 0u32;
         loop {
-            let byte = *data
-                .get(*pos)
-                .ok_or_else(|| anyhow::anyhow!("unexpected eof reading varint"))?;
+            let byte =
+                *data.get(*pos).ok_or_else(|| anyhow::anyhow!("unexpected eof reading varint"))?;
             *pos += 1;
             value |= ((byte & 0x7F) as u64) << shift;
             if byte & 0x80 == 0 {
@@ -488,21 +474,16 @@ fn decode_manual_legacy(data: &[u8]) -> anyhow::Result<Lockfile> {
     }
 
     fn read_u8(data: &[u8], pos: &mut usize) -> anyhow::Result<u8> {
-        let byte = *data
-            .get(*pos)
-            .ok_or_else(|| anyhow::anyhow!("unexpected eof reading byte"))?;
+        let byte = *data.get(*pos).ok_or_else(|| anyhow::anyhow!("unexpected eof reading byte"))?;
         *pos += 1;
         Ok(byte)
     }
 
     fn read_string(data: &[u8], pos: &mut usize) -> anyhow::Result<String> {
         let len = read_varint(data, pos)? as usize;
-        let end = pos
-            .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("length overflow"))?;
-        let slice = data
-            .get(*pos..end)
-            .ok_or_else(|| anyhow::anyhow!("unexpected eof reading string"))?;
+        let end = pos.checked_add(len).ok_or_else(|| anyhow::anyhow!("length overflow"))?;
+        let slice =
+            data.get(*pos..end).ok_or_else(|| anyhow::anyhow!("unexpected eof reading string"))?;
         *pos = end;
         Ok(std::str::from_utf8(slice)?.to_owned())
     }
@@ -569,6 +550,10 @@ fn decode_manual_legacy(data: &[u8]) -> anyhow::Result<Lockfile> {
             peer_dependencies_meta,
             os: Vec::new(),
             cpu_arch: Vec::new(),
+            store_key: None,
+            content_hash: None,
+            link_mode: None,
+            store_path: None,
         };
         packages.insert(key, entry);
     }
@@ -655,29 +640,13 @@ struct LegacyPackageEntry {
     pub resolved: Option<String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "devDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "devDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub dev_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "optionalDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "optionalDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub optional_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "peerDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "peerDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "peerDependenciesMeta",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "peerDependenciesMeta", skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_dependencies_meta: BTreeMap<String, PeerMeta>,
     #[serde(default)]
     pub os: Vec<String>,
@@ -711,13 +680,14 @@ impl From<LegacyLockfile> for Lockfile {
                         peer_dependencies_meta: v.peer_dependencies_meta,
                         os: Vec::new(),
                         cpu_arch: Vec::new(),
+                        store_key: None,
+                        content_hash: None,
+                        link_mode: None,
+                        store_path: None,
                     },
                 )
             })
             .collect();
-        Lockfile {
-            format: old.format,
-            packages,
-        }
+        Lockfile { format: old.format, packages }
     }
 }

@@ -26,11 +26,8 @@ impl Resolver {
         // Support npm-style OR sets using '||' by evaluating as union of sub-ranges
         let is_or = range.contains("||") || norm.contains("||");
         let reqs: Vec<VersionReq> = if is_or {
-            let parts: Vec<&str> = range
-                .split("||")
-                .map(|p| p.trim())
-                .filter(|p| !p.is_empty())
-                .collect();
+            let parts: Vec<&str> =
+                range.split("||").map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
             let mut v: Vec<VersionReq> = Vec::new();
             for p in parts {
                 let pnorm = canonicalize_npm_range(p);
@@ -208,9 +205,7 @@ fn expand_wildcard(pattern: &str) -> String {
     }
     if parts.len() == 2 && (parts[1].eq_ignore_ascii_case("x") || parts[1] == "*") {
         if let Ok(maj) = parts[0].parse::<u64>() {
-            return format!(">={maj}.0.0, <{} .0.0", maj + 1)
-                .replace("  ", " ")
-                .replace(" .", ".");
+            return format!(">={maj}.0.0, <{} .0.0", maj + 1).replace("  ", " ").replace(" .", ".");
         }
     }
     if parts.len() == 3 && (parts[2].eq_ignore_ascii_case("x") || parts[2] == "*") {

@@ -1,7 +1,11 @@
+use crate::cache::StoreEntry;
+use crate::lockfile::Lockfile;
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
 pub struct PackageInstance {
@@ -14,76 +18,175 @@ pub struct PackageInstance {
     pub peer_dependencies: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallMode {
+    Link,
+    Copy,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallPlanEntry {
+    pub package: PackageInstance,
+    pub store_entry: StoreEntry,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallOutcome {
+    pub package_name: String,
+    pub link_mode: InstallMode,
+}
+
 #[derive(Debug)]
-pub struct Installer;
+pub struct Installer {
+    mode: InstallMode,
+}
 
 impl Installer {
-    pub fn new() -> Self {
-        Self
+    pub fn new(mode: InstallMode) -> Self {
+        Self { mode }
     }
 
     pub fn install(
         &self,
         project_root: &Path,
-        instances: &HashMap<String, PackageInstance>,
-        _root_deps: &BTreeMap<String, String>,
-    ) -> Result<()> {
+        plan: &HashMap<String, InstallPlanEntry>,
+        lock: &mut Lockfile,
+    ) -> Result<Vec<InstallOutcome>> {
         let node_modules = project_root.join("node_modules");
         fs::create_dir_all(&node_modules)?;
-        for inst in instances.values() {
-            let cache_pkg_dir = crate::cache::cache_package_path(&inst.name, &inst.version);
-            let mut dest = node_modules.clone();
-            for part in inst.name.split('/') {
-                dest = dest.join(part);
-            }
-            if dest.exists() {
-                // Even if package dir exists, ensure bins are created
-            } else {
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
+        let mut names: Vec<String> = plan.keys().cloned().collect();
+        names.sort();
+
+        let install_results: Result<Vec<(String, InstallMode)>> = names
+            .par_iter()
+            .map(|name| -> Result<(String, InstallMode)> {
+                let entry =
+                    plan.get(name).expect("plan entries should remain stable across iteration");
+                let mut dest = node_modules.clone();
+                for part in entry.package.name.split('/') {
+                    dest.push(part);
                 }
-                materialize_package_dir(&cache_pkg_dir, &dest)?;
+                let outcome_mode = self
+                    .materialize(&entry.store_entry, &dest)
+                    .with_context(|| format!("materialize {} into project", entry.package.name))?;
+
+                create_bin_shims(project_root, &entry.package.name, &dest)
+                    .with_context(|| format!("create bin shims for {}", entry.package.name))?;
+
+                Ok((entry.package.name.clone(), outcome_mode))
+            })
+            .collect();
+
+        let install_results = install_results?;
+        let mut outcomes = Vec::with_capacity(install_results.len());
+        for (package_name, outcome_mode) in install_results {
+            if let Some(entry) = plan.get(&package_name) {
+                if let Some(lock_entry) =
+                    lock.packages.get_mut(&format!("node_modules/{}", entry.package.name))
+                {
+                    lock_entry.store_key = Some(entry.store_entry.store_key.clone());
+                    lock_entry.content_hash = Some(entry.store_entry.content_hash.clone());
+                    lock_entry.link_mode = Some(match outcome_mode {
+                        InstallMode::Link => "link".to_string(),
+                        InstallMode::Copy => "copy".to_string(),
+                    });
+                    lock_entry.store_path = Some(entry.store_entry.root_dir.display().to_string());
+                }
+                outcomes.push(InstallOutcome {
+                    package_name: entry.package.name.clone(),
+                    link_mode: outcome_mode,
+                });
             }
-            // After materializing, create .bin shims if package has bin entries
-            create_bin_shims(project_root, &inst.name, &dest)
-                .with_context(|| format!("create bin shims for {}", inst.name))?;
         }
-        Ok(())
+        Ok(outcomes)
+    }
+
+    fn materialize(&self, store_entry: &StoreEntry, dest: &Path) -> Result<InstallMode> {
+        if dest.exists() || std::fs::symlink_metadata(dest).is_ok() {
+            fs::remove_dir_all(dest).or_else(|_| {
+                if dest.is_file() {
+                    fs::remove_file(dest)
+                } else {
+                    Err(std::io::Error::other("failed to remove existing destination"))
+                }
+            })?;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        match self.mode {
+            InstallMode::Copy => {
+                copy_tree_only(store_entry.package_dir(), dest)?;
+                Ok(InstallMode::Copy)
+            }
+            InstallMode::Link => {
+                let linked = link_or_copy_tree(store_entry.package_dir(), dest)?;
+                if linked {
+                    Ok(InstallMode::Link)
+                } else {
+                    Ok(InstallMode::Copy)
+                }
+            }
+        }
     }
 }
 
 impl Default for Installer {
     fn default() -> Self {
-        Self::new()
+        Self::new(InstallMode::Copy)
     }
 }
 
-pub fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
-    if !to.exists() {
-        fs::create_dir_all(to)?;
-    }
-    for entry in fs::read_dir(from)? {
+fn copy_tree_only(from: &Path, to: &Path) -> Result<()> {
+    for entry in WalkDir::new(from).follow_links(false) {
         let entry = entry?;
-        let p = entry.path();
-        let meta = entry.metadata()?;
-        let dst = to.join(entry.file_name());
-        if meta.is_dir() {
-            copy_dir_recursive(&p, &dst)?;
-        } else if let Err(_e) = std::fs::hard_link(&p, &dst) {
-            std::fs::copy(&p, &dst)?;
+        let rel = entry.path().strip_prefix(from)?;
+        if rel.as_os_str().is_empty() {
+            continue;
         }
+        let dest = to.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest)?;
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(entry.path(), &dest)?;
+        let perms = entry.metadata()?.permissions();
+        fs::set_permissions(&dest, perms)?;
     }
     Ok(())
 }
 
-fn materialize_package_dir(from: &Path, to: &Path) -> Result<()> {
-    if to.exists() || std::fs::symlink_metadata(to).is_ok() {
-        return Ok(());
+fn link_or_copy_tree(from: &Path, to: &Path) -> Result<bool> {
+    let mut all_linked = true;
+    for entry in WalkDir::new(from).follow_links(false) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(from)?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let dest = to.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest)?;
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::hard_link(entry.path(), &dest) {
+            Ok(_) => {}
+            Err(_) => {
+                fs::copy(entry.path(), &dest)?;
+                all_linked = false;
+            }
+        }
+        let perms = entry.metadata()?.permissions();
+        fs::set_permissions(&dest, perms)?;
     }
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    copy_dir_recursive(from, to)
+    Ok(all_linked)
 }
 
 fn create_bin_shims(project_root: &Path, package_name: &str, pkg_dest_dir: &Path) -> Result<()> {
@@ -191,13 +294,7 @@ fn write_windows_exe_shim(dest_exe: &Path, relative_target: &Path) -> Result<()>
 #[cfg(unix)]
 fn write_unix_native_shim(dest: &Path, relative_target: &Path) -> Result<()> {
     // Copy the pacm-shim binary next to pacm and append marker with relative path
-    let mut shim_bin = std::env::current_exe().with_context(|| "locate pacm executable")?;
-    shim_bin.set_file_name("pacm-shim");
-    if !shim_bin.exists() {
-        // Fallback: try alongside in release/debug target structure
-        // If not found, error out with context
-        anyhow::bail!("pacm-shim binary not found at {}", shim_bin.display());
-    }
+    let shim_bin = locate_unix_pacm_shim()?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -216,4 +313,50 @@ fn write_unix_native_shim(dest: &Path, relative_target: &Path) -> Result<()> {
         fs::set_permissions(dest, perms)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn locate_unix_pacm_shim() -> Result<PathBuf> {
+    fn find_candidate(dir: &Path) -> Option<PathBuf> {
+        for name in ["pacm-shim", "pacm_shim"] {
+            let direct = dir.join(name);
+            if direct.is_file() {
+                return Some(direct);
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if (name.starts_with("pacm-shim") || name.starts_with("pacm_shim"))
+                    && !name.ends_with(".d")
+                    && !name.ends_with(".rlib")
+                    && !name.ends_with(".rmeta")
+                {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    let current = std::env::current_exe().with_context(|| "locate pacm executable")?;
+    let exe_dir = current.parent().with_context(|| "determine pacm executable directory")?;
+
+    if let Some(candidate) = find_candidate(exe_dir) {
+        return Ok(candidate);
+    }
+
+    for ancestor in exe_dir.ancestors().skip(1) {
+        if let Some(candidate) = find_candidate(ancestor) {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!("pacm-shim binary not found near {}", exe_dir.display());
 }

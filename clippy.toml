@@ -1,0 +1,2 @@
+msrv = "1.74.0"
+warn-on-all-wildcard-imports = true

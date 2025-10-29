@@ -9,21 +9,14 @@ pub(super) struct ProgressRenderer {
 
 impl ProgressRenderer {
     pub(super) fn new() -> Self {
-        Self {
-            last_len: 0,
-            last_status: String::new(),
-        }
+        Self { last_len: 0, last_status: String::new() }
     }
 
     pub(super) fn render(&mut self, message: impl Into<String>) {
         let message = message.into();
         self.last_status = message.clone();
         let mut out = io::stdout();
-        let pad = if self.last_len > message.len() {
-            self.last_len - message.len()
-        } else {
-            0
-        };
+        let pad = if self.last_len > message.len() { self.last_len - message.len() } else { 0 };
         write!(out, "\r{}{}", message, " ".repeat(pad)).ok();
         out.flush().ok();
         self.last_len = message.len();

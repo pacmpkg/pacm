@@ -8,7 +8,7 @@ mod remove;
 
 pub(crate) use cache::{cmd_cache_clean, cmd_cache_path};
 pub(crate) use init::cmd_init;
-pub(crate) use install::cmd_install;
+pub(crate) use install::{cmd_install, InstallOptions};
 pub(crate) use list::cmd_list;
 pub(crate) use pm::{cmd_pm_lockfile, cmd_pm_prune};
 pub(crate) use remove::cmd_remove;

@@ -17,10 +17,8 @@ fn real_main() -> Result<()> {
         let sidecar = PathBuf::from(format!("{}.shim", exe_path.to_string_lossy()));
         if sidecar.exists() {
             let target = fs::read_to_string(&sidecar).with_context(|| "read .shim file")?;
-            let base = exe_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."));
+            let base =
+                exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
             let target_path = base.join(target.trim());
             let mut cmd = Command::new("node");
             cmd.arg(target_path);
