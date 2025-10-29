@@ -1,0 +1,2 @@
+*.rs     eol=lf
+*.toml   eol=lf
