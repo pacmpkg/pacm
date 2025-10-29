@@ -8,23 +8,11 @@ pub struct Manifest {
     pub version: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "devDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "devDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub dev_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "optionalDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "optionalDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub optional_dependencies: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "peerDependencies",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, rename = "peerDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_dependencies: BTreeMap<String, String>,
 }
 

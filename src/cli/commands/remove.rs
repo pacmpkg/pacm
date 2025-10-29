@@ -40,11 +40,8 @@ pub fn cmd_remove(packages: Vec<String>) -> Result<()> {
     manifest::write(&manifest, &manifest_path)?;
 
     let lock_path = PathBuf::from("pacm.lockb");
-    let mut lock = if lock_path.exists() {
-        lockfile::load(&lock_path)?
-    } else {
-        Lockfile::default()
-    };
+    let mut lock =
+        if lock_path.exists() { lockfile::load(&lock_path)? } else { Lockfile::default() };
 
     prune_removed_from_lock(&mut lock, &actually_removed);
     let trans_removed = prune_unreachable(&mut lock);

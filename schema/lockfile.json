@@ -41,7 +41,11 @@
             "default": {}
           },
           "os": { "type": "array", "items": { "type": "string" }, "default": [] },
-          "cpu": { "type": "array", "items": { "type": "string" }, "default": [] }
+          "cpu": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "storeKey": { "type": ["string", "null"] },
+          "contentHash": { "type": ["string", "null"] },
+          "linkMode": { "type": ["string", "null"] },
+          "storePath": { "type": ["string", "null"] }
         }
       }
     }

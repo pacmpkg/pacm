@@ -12,17 +12,11 @@ pub(super) fn add_spec_with_version(
         anyhow::bail!("empty package name");
     }
     if dev {
-        manifest
-            .dev_dependencies
-            .insert(name.to_string(), version.to_string());
+        manifest.dev_dependencies.insert(name.to_string(), version.to_string());
     } else if optional {
-        manifest
-            .optional_dependencies
-            .insert(name.to_string(), version.to_string());
+        manifest.optional_dependencies.insert(name.to_string(), version.to_string());
     } else {
-        manifest
-            .dependencies
-            .insert(name.to_string(), version.to_string());
+        manifest.dependencies.insert(name.to_string(), version.to_string());
     }
     Ok(())
 }
@@ -38,10 +32,7 @@ pub(super) fn looks_like_dist_tag(spec: &str) -> bool {
     if trimmed.contains(' ') || trimmed.contains("||") || trimmed.contains(',') {
         return false;
     }
-    if !trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
         return false;
     }
     let canon = crate::resolver::canonicalize_npm_range(trimmed);

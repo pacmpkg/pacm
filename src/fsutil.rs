@@ -9,6 +9,14 @@ pub fn cache_root() -> PathBuf {
     root
 }
 
+pub fn store_root() -> PathBuf {
+    let mut root = data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    root.push("pacm");
+    root.push("store");
+    root.push("v1");
+    root
+}
+
 pub fn ensure_dir(p: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(p)
 }

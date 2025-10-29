@@ -1,4 +1,3 @@
-use super::download::{human_size, perform_download, DownloadProgress};
 use super::fast::build_fast_instances;
 use super::manifest_updates::{parse_spec, update_manifest_for_specs};
 use super::node_modules::node_modules_intact;
@@ -8,18 +7,19 @@ use super::prune::{
     cleanup_empty_node_modules_dir, lockfile_has_no_packages, prune_removed_from_lock,
     prune_unreachable, remove_dirs,
 };
+use crate::cache::{CasStore, DependencyFingerprint, EnsureParams, StoreEntry};
 use crate::colors::*;
 use crate::fetch::Fetcher;
-use crate::installer::{Installer, PackageInstance};
+use crate::installer::{InstallMode, InstallPlanEntry, Installer, PackageInstance};
 use crate::lockfile::{self, Lockfile, PackageEntry};
 use crate::manifest;
-use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use anyhow::{anyhow, bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+use rayon::prelude::*;
 
 fn ensure_lock_entry<'a>(lock: &'a mut Lockfile, name: &str) -> &'a mut PackageEntry {
     let key = format!("node_modules/{name}");
@@ -34,6 +34,10 @@ fn ensure_lock_entry<'a>(lock: &'a mut Lockfile, name: &str) -> &'a mut PackageE
         peer_dependencies_meta: BTreeMap::new(),
         os: Vec::new(),
         cpu_arch: Vec::new(),
+        store_key: None,
+        content_hash: None,
+        link_mode: None,
+        store_path: None,
     })
 }
 
@@ -61,17 +65,56 @@ fn write_lock_entry(
     entry.peer_dependencies_meta = peer_meta.clone();
     entry.os = os.to_vec();
     entry.cpu_arch = cpu_arch.to_vec();
+    entry.store_key = None;
+    entry.content_hash = None;
+    entry.link_mode = None;
+    entry.store_path = None;
 }
 
-pub(crate) fn cmd_install(
-    specs: Vec<String>,
-    dev: bool,
-    optional: bool,
-    no_save: bool,
-    _exact: bool,
-    prefer_offline: bool,
-    no_progress: bool,
-) -> Result<()> {
+#[derive(Clone)]
+struct PendingDownload {
+    name: String,
+    version: String,
+    url: String,
+    integrity_hint: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct InstallOptions {
+    pub dev: bool,
+    pub optional: bool,
+    pub no_save: bool,
+    pub exact: bool,
+    pub prefer_offline: bool,
+    pub no_progress: bool,
+    pub link: bool,
+    pub copy: bool,
+}
+
+fn download_into_cache(
+    fetcher: &Fetcher,
+    name: &str,
+    version: &str,
+    url: &str,
+    integrity_hint: Option<&str>,
+) -> Result<String> {
+    let bytes = fetcher
+        .download_tarball(url)
+        .with_context(|| format!("download tarball for {name}@{version}"))?;
+    crate::cache::ensure_cached_package(name, version, &bytes, integrity_hint)
+}
+
+pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result<()> {
+    let InstallOptions {
+        dev,
+        optional,
+        no_save,
+        exact: _exact,
+        prefer_offline,
+        no_progress,
+        link,
+        copy,
+    } = options;
     let manifest_path = PathBuf::from("package.json");
     if !manifest_path.exists() {
         println!("{C_GRAY}[pacm]{C_RESET} {C_RED}error{C_RESET} no package.json found. Run 'pacm init' first.");
@@ -79,14 +122,7 @@ pub(crate) fn cmd_install(
     }
     let mut manifest = manifest::load(&manifest_path)?;
 
-    update_manifest_for_specs(
-        &specs,
-        &mut manifest,
-        &manifest_path,
-        dev,
-        optional,
-        no_save,
-    )?;
+    update_manifest_for_specs(&specs, &mut manifest, &manifest_path, dev, optional, no_save)?;
 
     let lock_path = PathBuf::from("pacm.lockb");
     let mut lock = if lock_path.exists() {
@@ -103,6 +139,13 @@ pub(crate) fn cmd_install(
         }
     };
     let original_lock = lock.clone();
+
+    if link && copy {
+        bail!("--link and --copy cannot be used together");
+    }
+    let install_mode = if copy { InstallMode::Copy } else { InstallMode::Link };
+    let store = CasStore::open()?;
+    let project_root = std::env::current_dir()?;
 
     let old_root_deps: BTreeMap<String, String> = original_lock
         .packages
@@ -155,58 +198,65 @@ pub(crate) fn cmd_install(
                     remove_dirs(&trans_removed);
                 }
             }
-            let start = Instant::now();
-            let mut merged_root_deps: BTreeMap<String, String> = BTreeMap::new();
-            merged_root_deps.extend(manifest.dependencies.clone());
-            merged_root_deps.extend(manifest.dev_dependencies.clone());
-            merged_root_deps.extend(manifest.optional_dependencies.clone());
-            let progress = Arc::new(Mutex::new(ProgressRenderer::new()));
-            {
-                let mut pr = progress.lock().unwrap();
-                pr.render(format_status(
-                    "fast",
-                    "link: using cached store; skipping resolution",
-                ));
-            }
-            let installer = Installer::new();
-            let as_hash: std::collections::HashMap<String, PackageInstance> =
-                instances.clone().into_iter().collect();
-            installer.install(&std::env::current_dir()?, &as_hash, &merged_root_deps)?;
-            {
-                let mut pr = progress.lock().unwrap();
-                pr.finish();
-            }
-            lockfile::write(&lock, lock_path.clone())?;
-            if lockfile_has_no_packages(&lock) {
-                let _ = std::fs::remove_file(&lock_path);
-            }
-            cleanup_empty_node_modules_dir();
-            let dur = start.elapsed();
-            if added_root.is_empty() && removed_root.is_empty() {
-                println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
-            }
-            for r in &removed_root {
-                if let Some(ver) = original_lock
-                    .packages
-                    .get(&format!("node_modules/{r}"))
-                    .and_then(|e| e.version.as_ref())
+            if let Ok(plan) = build_plan_from_lock(&store, &lock, &instances) {
+                let start = Instant::now();
+                let progress = Arc::new(Mutex::new(ProgressRenderer::new()));
                 {
-                    println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}@{ver}");
-                } else {
-                    println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}");
+                    let mut pr = progress.lock().unwrap();
+                    pr.render(format_status(
+                        "fast",
+                        "link: using cached store; skipping resolution",
+                    ));
                 }
+                let installer = Installer::new(install_mode);
+                let outcomes = installer.install(&project_root, &plan, &mut lock)?;
+                {
+                    let mut pr = progress.lock().unwrap();
+                    pr.finish();
+                }
+                lockfile::write(&lock, lock_path.clone())?;
+                if lockfile_has_no_packages(&lock) {
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                cleanup_empty_node_modules_dir();
+                let dur = start.elapsed();
+                if added_root.is_empty() && removed_root.is_empty() {
+                    println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
+                }
+                for r in &removed_root {
+                    if let Some(ver) = original_lock
+                        .packages
+                        .get(&format!("node_modules/{r}"))
+                        .and_then(|e| e.version.as_ref())
+                    {
+                        println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}@{ver}");
+                    } else {
+                        println!("{C_GRAY}[pacm]{C_RESET} {C_RED}-{C_RESET} {r}");
+                    }
+                }
+                let total = plan.len();
+                println!(
+                    "{gray}[pacm]{reset} summary: {green}0 added{reset}, {red}{removed} removed{reset}",
+                    gray = C_GRAY,
+                    green = C_GREEN,
+                    red = C_RED,
+                    removed = removed_root.len(),
+                    reset = C_RESET
+                );
+                let linked_count =
+                    outcomes.iter().filter(|o| o.link_mode == InstallMode::Link).count();
+                let copied_count = total.saturating_sub(linked_count);
+                if copied_count == 0 {
+                    println!(
+                        "{C_GRAY}[pacm]{C_RESET} {C_GREEN}linked{C_RESET} {total} packages (all cached) in {dur:.2?}"
+                    );
+                } else {
+                    println!(
+                        "{C_GRAY}[pacm]{C_RESET} linked {C_GREEN}{linked_count}{C_RESET} packages ({C_DIM}{copied_count}{C_RESET} copied fallback) in {dur:.2?}"
+                    );
+                }
+                return Ok(());
             }
-            let total = as_hash.len();
-            println!(
-                "{gray}[pacm]{reset} summary: {green}0 added{reset}, {red}{removed} removed{reset}",
-                gray = C_GRAY,
-                green = C_GREEN,
-                red = C_RED,
-                removed = removed_root.len(),
-                reset = C_RESET
-            );
-            println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}linked{C_RESET} {total} packages (all cached) in {dur:.2?}");
-            return Ok(());
         }
     }
 
@@ -223,34 +273,18 @@ pub(crate) fn cmd_install(
     let mut queue: VecDeque<Task> = VecDeque::new();
     if specs.is_empty() {
         for (n, r) in &manifest.dependencies {
-            queue.push_back(Task {
-                name: n.clone(),
-                range: r.clone(),
-                optional_root: false,
-            });
+            queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: false });
         }
         for (n, r) in &manifest.dev_dependencies {
-            queue.push_back(Task {
-                name: n.clone(),
-                range: r.clone(),
-                optional_root: false,
-            });
+            queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: false });
         }
         for (n, r) in &manifest.optional_dependencies {
-            queue.push_back(Task {
-                name: n.clone(),
-                range: r.clone(),
-                optional_root: true,
-            });
+            queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: true });
         }
     } else {
         for spec in &specs {
             let (name, req) = parse_spec(spec);
-            queue.push_back(Task {
-                name,
-                range: req,
-                optional_root: optional,
-            });
+            queue.push_back(Task { name, range: req, optional_root: optional });
         }
     }
 
@@ -258,98 +292,11 @@ pub(crate) fn cmd_install(
     let start = Instant::now();
     let mut installed_count = 0usize;
     let progress = Arc::new(Mutex::new(ProgressRenderer::new()));
-    let downloads: Arc<Mutex<Vec<DownloadProgress>>> = Arc::new(Mutex::new(Vec::new()));
-    let progress_clone = progress.clone();
-    let downloads_clone = downloads.clone();
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_thread = stop_flag.clone();
-
-    let painter = if no_progress {
-        None
-    } else {
-        Some(thread::spawn(move || {
-            let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut tick: usize = 0;
-            loop {
-                thread::sleep(Duration::from_millis(100));
-                let mut pr = progress_clone.lock().unwrap();
-                let dl = downloads_clone.lock().unwrap();
-                let mut active_lines = Vec::new();
-                for d in dl.iter() {
-                    if d.done {
-                        continue;
-                    }
-                    let frame = spinner_frames[tick % spinner_frames.len()];
-                    let total = d.total.unwrap_or(0);
-                    let pct = if total > 0 {
-                        (d.downloaded as f64 / total as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    let bar = if total > 0 {
-                        let width = 18usize;
-                        let filled = ((d.downloaded as f64 / total as f64) * width as f64) as usize;
-                        let mut s = String::new();
-                        s.push('[');
-                        s.push_str(&"#".repeat(filled.min(width)));
-                        s.push_str(&"-".repeat(width.saturating_sub(filled)));
-                        s.push(']');
-                        s
-                    } else {
-                        "[.................]".to_string()
-                    };
-                    let elapsed = d.started_at.elapsed().as_secs_f64();
-                    let speed = if elapsed > 0.0 {
-                        d.downloaded as f64 / elapsed
-                    } else {
-                        0.0
-                    };
-                    let eta = if total > 0 && speed > 0.0 {
-                        let remain = (total.saturating_sub(d.downloaded)) as f64 / speed;
-                        format!("{remain:.1}s")
-                    } else {
-                        "?s".to_string()
-                    };
-                    active_lines.push(format!(
-                        "{frame} {name}@{ver} {bar} {pct:.0}% {done}/{total} {spd}/s ETA {eta}",
-                        frame = frame,
-                        name = d.name,
-                        ver = d.version,
-                        bar = bar,
-                        pct = pct,
-                        done = human_size(d.downloaded),
-                        total = if total > 0 {
-                            human_size(total)
-                        } else {
-                            "?".into()
-                        },
-                        spd = human_size(speed as u64),
-                        eta = eta
-                    ));
-                }
-                tick = tick.wrapping_add(1);
-                if active_lines.is_empty() {
-                    if stop_flag_thread.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    continue;
-                }
-                pr.render(active_lines.join(" | "));
-                if dl.iter().all(|d| d.done) && stop_flag_thread.load(Ordering::SeqCst) {
-                    break;
-                }
-            }
-        }))
-    };
+    let mut pending_downloads: Vec<PendingDownload> = Vec::new();
 
     let mut instances: BTreeMap<String, PackageInstance> = BTreeMap::new();
 
-    while let Some(Task {
-        name,
-        range,
-        optional_root,
-    }) = queue.pop_front()
-    {
+    while let Some(Task { name, range, optional_root }) = queue.pop_front() {
         if visited_name_version.iter().any(|(n, _)| n == &name) {
             continue;
         }
@@ -504,14 +451,7 @@ pub(crate) fn cmd_install(
                         cached_mf
                             .peer_dependencies_meta
                             .into_iter()
-                            .map(|(k, v)| {
-                                (
-                                    k,
-                                    crate::lockfile::PeerMeta {
-                                        optional: v.optional,
-                                    },
-                                )
-                            })
+                            .map(|(k, v)| (k, crate::lockfile::PeerMeta { optional: v.optional }))
                             .collect(),
                         None,
                     )
@@ -572,21 +512,9 @@ pub(crate) fn cmd_install(
             }
             let mut pmm = BTreeMap::new();
             for (n, m) in &version_meta.peer_dependencies_meta {
-                pmm.insert(
-                    n.clone(),
-                    crate::lockfile::PeerMeta {
-                        optional: m.optional,
-                    },
-                );
+                pmm.insert(n.clone(), crate::lockfile::PeerMeta { optional: m.optional });
             }
-            (
-                integrity_owned,
-                dm,
-                om,
-                pm,
-                pmm,
-                Some(version_meta.dist.tarball.clone()),
-            )
+            (integrity_owned, dm, om, pm, pmm, Some(version_meta.dist.tarball.clone()))
         };
 
         let resolved_for_lock = resolved_url.clone().or_else(|| {
@@ -624,9 +552,11 @@ pub(crate) fn cmd_install(
         }
         let mut reused = false;
         let cached = crate::cache::cache_package_path(&name, &picked_version).exists();
-        let integrity = if cached {
+        let integrity_for_entry_string: Option<String>;
+
+        if cached {
             reused = true;
-            integrity_owned.as_deref().unwrap_or("").to_string()
+            integrity_for_entry_string = integrity_owned.clone();
         } else {
             if prefer_offline {
                 if optional_root {
@@ -638,56 +568,63 @@ pub(crate) fn cmd_install(
                     ver = picked_ver
                 );
             }
-            if !no_progress {
-                let mut pr = progress.lock().unwrap();
-                pr.render(format_status(
-                    "downloading",
-                    &format!("{name}@{picked_version}"),
-                ));
-            }
             let url = resolved_url
                 .as_deref()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| tarball_url.clone());
-            let bytes = match perform_download(&fetcher, &name, &picked_version, &url, &downloads) {
-                Ok(b) => b,
-                Err(e) => {
-                    if optional_root {
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            if !no_progress {
-                let mut pr = progress.lock().unwrap();
-                pr.render(format_status(
-                    "extracting",
-                    &format!("{name}@{picked_version}"),
-                ));
-            }
-            match crate::cache::ensure_cached_package(
-                &name,
-                &picked_version,
-                &bytes,
-                integrity_owned.as_deref(),
-            ) {
-                Ok(i) => i,
-                Err(e) => {
-                    if optional_root {
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        };
 
-        let integrity_for_entry = if integrity.is_empty() {
-            None
-        } else {
-            Some(integrity.as_str())
-        };
+            if optional_root {
+                if !no_progress {
+                    let mut pr = progress.lock().unwrap();
+                    pr.render(format_status("downloading", &format!("{name}@{picked_version}")));
+                }
+                let download_result = download_into_cache(
+                    &fetcher,
+                    &name,
+                    &picked_version,
+                    &url,
+                    integrity_owned.as_deref(),
+                );
+                match download_result {
+                    Ok(integrity) => {
+                        integrity_for_entry_string = Some(integrity);
+                    }
+                    Err(e) => {
+                        if optional_root {
+                            if !no_progress {
+                                let mut pr = progress.lock().unwrap();
+                                pr.render(format_status(
+                                    "fast",
+                                    &format!(
+                                        "skip optional {name}@{picked_version} (download failed)"
+                                    ),
+                                ));
+                            }
+                            continue;
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            } else {
+                if !no_progress {
+                    let mut pr = progress.lock().unwrap();
+                    pr.render(format_status(
+                        "queued",
+                        &format!("download {name}@{picked_version}"),
+                    ));
+                }
+                pending_downloads.push(PendingDownload {
+                    name: name.clone(),
+                    version: picked_version.clone(),
+                    url,
+                    integrity_hint: integrity_owned.clone(),
+                });
+                integrity_for_entry_string = integrity_owned.clone();
+            }
+        }
+
+        let integrity_for_entry = integrity_for_entry_string.as_deref();
         write_lock_entry(
             &mut lock,
             &name,
@@ -730,11 +667,46 @@ pub(crate) fn cmd_install(
             }
         }
         for (dn, dr, optflag) in to_enqueue {
-            queue.push_back(Task {
-                name: dn,
-                range: dr,
-                optional_root: optflag,
-            });
+            queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+        }
+    }
+
+    if !pending_downloads.is_empty() {
+        if !no_progress {
+            let mut pr = progress.lock().unwrap();
+            pr.render(format_status(
+                "downloading",
+                &format!("{} packages in parallel", pending_downloads.len()),
+            ));
+        }
+
+        let download_results: Result<Vec<(String, String)>> = pending_downloads
+            .par_iter()
+            .map(|pd| -> Result<(String, String)> {
+                let integrity = download_into_cache(
+                    &fetcher,
+                    &pd.name,
+                    &pd.version,
+                    &pd.url,
+                    pd.integrity_hint.as_deref(),
+                )?;
+                Ok((pd.name.clone(), integrity))
+            })
+            .collect();
+
+        let download_results = download_results?;
+        for (pkg_name, integrity) in download_results {
+            if let Some(entry) = lock.packages.get_mut(&format!("node_modules/{pkg_name}")) {
+                entry.integrity = Some(integrity);
+            }
+        }
+
+        if !no_progress {
+            let mut pr = progress.lock().unwrap();
+            pr.render(format_status(
+                "cached",
+                &format!("downloaded {} packages", pending_downloads.len()),
+            ));
         }
     }
 
@@ -751,11 +723,8 @@ pub(crate) fn cmd_install(
             }
             if let Some(pkg_name) = k.strip_prefix("node_modules/") {
                 for peer in entry.peer_dependencies.keys() {
-                    let is_optional = entry
-                        .peer_dependencies_meta
-                        .get(peer)
-                        .map(|m| m.optional)
-                        .unwrap_or(false);
+                    let is_optional =
+                        entry.peer_dependencies_meta.get(peer).map(|m| m.optional).unwrap_or(false);
                     if is_optional {
                         continue;
                     }
@@ -774,20 +743,9 @@ pub(crate) fn cmd_install(
         }
     }
 
-    let installer = Installer::new();
-    let mut merged_root_deps: BTreeMap<String, String> = BTreeMap::new();
-    merged_root_deps.extend(manifest.dependencies.clone());
-    merged_root_deps.extend(manifest.dev_dependencies.clone());
-    merged_root_deps.extend(manifest.optional_dependencies.clone());
-
-    let total_packages_for_summary = instances.len();
-    let instances_for_link: std::collections::HashMap<String, PackageInstance> =
-        instances.clone().into_iter().collect();
-    installer.install(
-        &std::env::current_dir()?,
-        &instances_for_link,
-        &merged_root_deps,
-    )?;
+    let plan = ensure_store_plan(&store, &mut lock, &instances)?;
+    let installer = Installer::new(install_mode);
+    let outcomes = installer.install(&project_root, &plan, &mut lock)?;
     lockfile::write(&lock, lock_path.clone())?;
     if lockfile_has_no_packages(&lock) {
         let _ = std::fs::remove_file(&lock_path);
@@ -795,28 +753,23 @@ pub(crate) fn cmd_install(
     cleanup_empty_node_modules_dir();
     let dur = start.elapsed();
 
-    stop_flag.store(true, Ordering::SeqCst);
-    if let Some(p) = painter {
-        p.join().ok();
-    }
     if !no_progress {
         let mut pr = progress.lock().unwrap();
         pr.render(format_status("linking", "graph"));
         pr.finish();
     }
 
-    let total = total_packages_for_summary;
+    let total = plan.len();
     let reused = total.saturating_sub(installed_count);
+    let linked_count = outcomes.iter().filter(|o| o.link_mode == InstallMode::Link).count();
+    let copied_count = total.saturating_sub(linked_count);
 
     if added_root.is_empty() && removed_root.is_empty() {
         println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
     }
     for a in &added_root {
         if let Some(inst) = instances.get(a) {
-            println!(
-                "{C_GRAY}[pacm]{C_RESET} {C_GREEN}+{C_RESET} {}@{}",
-                a, inst.version
-            );
+            println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}+{C_RESET} {}@{}", a, inst.version);
         } else {
             println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}+{C_RESET} {a}");
         }
@@ -841,6 +794,129 @@ pub(crate) fn cmd_install(
         removed = removed_root.len(),
         reset = C_RESET
     );
-    println!("{C_GRAY}[pacm]{C_RESET} {C_GREEN}installed{C_RESET} {total} packages ({C_GREEN}{installed_count} downloaded{C_RESET}, {C_DIM}{reused} reused{C_RESET}) in {dur:.2?}");
+    if copied_count == 0 {
+        println!("{C_GRAY}[pacm]{C_RESET} linking: {C_GREEN}{linked_count}{C_RESET} linked");
+    } else {
+        println!(
+            "{C_GRAY}[pacm]{C_RESET} linking: {C_GREEN}{linked_count}{C_RESET} linked, {C_DIM}{copied_count}{C_RESET} copied"
+        );
+    }
+    println!(
+        "{C_GRAY}[pacm]{C_RESET} {C_GREEN}installed{C_RESET} {total} packages ({C_GREEN}{installed_count} downloaded{C_RESET}, {C_DIM}{reused} reused{C_RESET}) in {dur:.2?}"
+    );
     Ok(())
+}
+
+fn build_plan_from_lock(
+    store: &CasStore,
+    lock: &Lockfile,
+    instances: &BTreeMap<String, PackageInstance>,
+) -> Result<HashMap<String, InstallPlanEntry>> {
+    let mut plan = HashMap::new();
+    for (name, instance) in instances {
+        let key = format!("node_modules/{name}");
+        let lock_entry =
+            lock.packages.get(&key).ok_or_else(|| anyhow!("lockfile missing entry for {name}"))?;
+        let store_key = lock_entry
+            .store_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("no storeKey recorded for {name}"))?;
+        let store_entry = store
+            .load_entry(store_key)?
+            .ok_or_else(|| anyhow!("store entry {store_key} not found on disk"))?;
+        plan.insert(name.clone(), InstallPlanEntry { package: instance.clone(), store_entry });
+    }
+    Ok(plan)
+}
+
+fn ensure_store_plan(
+    store: &CasStore,
+    lock: &mut Lockfile,
+    instances: &BTreeMap<String, PackageInstance>,
+) -> Result<HashMap<String, InstallPlanEntry>> {
+    let mut memo: HashMap<String, StoreEntry> = HashMap::new();
+    let mut visiting: HashSet<String> = HashSet::new();
+
+    for name in instances.keys() {
+        let entry = ensure_store_for_package(store, lock, name, &mut memo, &mut visiting)?;
+        if let Some(lock_entry) = lock.packages.get_mut(&format!("node_modules/{name}")) {
+            lock_entry.store_key = Some(entry.store_key.clone());
+            lock_entry.content_hash = Some(entry.content_hash.clone());
+            lock_entry.store_path = Some(entry.root_dir.display().to_string());
+            lock_entry.link_mode = None;
+        }
+    }
+
+    let mut plan = HashMap::new();
+    for (name, instance) in instances {
+        if let Some(entry) = memo.get(name) {
+            plan.insert(
+                name.clone(),
+                InstallPlanEntry { package: instance.clone(), store_entry: entry.clone() },
+            );
+        }
+    }
+    Ok(plan)
+}
+
+fn ensure_store_for_package(
+    store: &CasStore,
+    lock: &Lockfile,
+    name: &str,
+    memo: &mut HashMap<String, StoreEntry>,
+    visiting: &mut HashSet<String>,
+) -> Result<StoreEntry> {
+    if let Some(existing) = memo.get(name) {
+        return Ok(existing.clone());
+    }
+    if !visiting.insert(name.to_string()) {
+        bail!("cyclic dependency detected involving {name}");
+    }
+
+    let key = format!("node_modules/{name}");
+    let lock_entry =
+        lock.packages.get(&key).ok_or_else(|| anyhow!("lockfile missing entry for {name}"))?;
+    let version = lock_entry
+        .version
+        .as_ref()
+        .ok_or_else(|| anyhow!("lockfile missing version for {name}"))?
+        .clone();
+
+    let mut dep_names: Vec<String> = Vec::new();
+    dep_names.extend(lock_entry.dependencies.keys().cloned());
+    dep_names.extend(lock_entry.optional_dependencies.keys().cloned());
+    dep_names.extend(lock_entry.peer_dependencies.keys().cloned());
+    dep_names.sort();
+    dep_names.dedup();
+
+    let mut dep_fps: Vec<DependencyFingerprint> = Vec::with_capacity(dep_names.len());
+    for dep in dep_names {
+        let dep_key = format!("node_modules/{dep}");
+        let Some(dep_entry) = lock.packages.get(&dep_key) else {
+            continue;
+        };
+        let Some(dep_version) = dep_entry.version.as_ref() else {
+            continue;
+        };
+        let dep_store_entry = ensure_store_for_package(store, lock, &dep, memo, visiting)?;
+        dep_fps.push(DependencyFingerprint {
+            name: dep.clone(),
+            version: dep_version.clone(),
+            store_key: Some(dep_store_entry.store_key.clone()),
+        });
+    }
+
+    let source_dir = crate::cache::cache_package_path(name, &version);
+    let params = EnsureParams {
+        name,
+        version: &version,
+        dependencies: &dep_fps,
+        source_dir: &source_dir,
+        integrity: lock_entry.integrity.as_deref(),
+        resolved: lock_entry.resolved.as_deref(),
+    };
+    let store_entry = store.ensure_entry(&params)?;
+    visiting.remove(name);
+    memo.insert(name.to_string(), store_entry.clone());
+    Ok(store_entry)
 }
