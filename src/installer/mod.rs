@@ -294,13 +294,7 @@ fn write_windows_exe_shim(dest_exe: &Path, relative_target: &Path) -> Result<()>
 #[cfg(unix)]
 fn write_unix_native_shim(dest: &Path, relative_target: &Path) -> Result<()> {
     // Copy the pacm-shim binary next to pacm and append marker with relative path
-    let mut shim_bin = std::env::current_exe().with_context(|| "locate pacm executable")?;
-    shim_bin.set_file_name("pacm-shim");
-    if !shim_bin.exists() {
-        // Fallback: try alongside in release/debug target structure
-        // If not found, error out with context
-        anyhow::bail!("pacm-shim binary not found at {}", shim_bin.display());
-    }
+    let shim_bin = locate_unix_pacm_shim()?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -319,4 +313,50 @@ fn write_unix_native_shim(dest: &Path, relative_target: &Path) -> Result<()> {
         fs::set_permissions(dest, perms)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn locate_unix_pacm_shim() -> Result<PathBuf> {
+    fn find_candidate(dir: &Path) -> Option<PathBuf> {
+        for name in ["pacm-shim", "pacm_shim"] {
+            let direct = dir.join(name);
+            if direct.is_file() {
+                return Some(direct);
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if (name.starts_with("pacm-shim") || name.starts_with("pacm_shim"))
+                    && !name.ends_with(".d")
+                    && !name.ends_with(".rlib")
+                    && !name.ends_with(".rmeta")
+                {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    let current = std::env::current_exe().with_context(|| "locate pacm executable")?;
+    let exe_dir = current.parent().with_context(|| "determine pacm executable directory")?;
+
+    if let Some(candidate) = find_candidate(exe_dir) {
+        return Ok(candidate);
+    }
+
+    for ancestor in exe_dir.ancestors().skip(1) {
+        if let Some(candidate) = find_candidate(ancestor) {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!("pacm-shim binary not found near {}", exe_dir.display());
 }
