@@ -41,7 +41,6 @@ pub(crate) fn build_fast_instances(
         let key = format!("node_modules/{name}");
         let entry = lock.packages.get(&key)?;
         let version = entry.version.clone()?;
-        let _ = entry.integrity.as_ref()?;
         if !crate::cache::cache_package_path(name, &version).exists() {
             return None;
         }

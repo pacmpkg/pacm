@@ -293,18 +293,49 @@ fn write_windows_exe_shim(dest_exe: &Path, relative_target: &Path) -> Result<()>
 
 #[cfg(unix)]
 fn write_unix_native_shim(dest: &Path, relative_target: &Path) -> Result<()> {
-    // Copy the pacm-shim binary next to pacm and append marker with relative path
-    let shim_bin = locate_unix_pacm_shim()?;
+    // Try to copy the packaged pacm-shim binary next to pacm and append marker with relative path.
+    // If the binary isn't available (e.g., CI/coverage builds), fall back to writing a small
+    // portable shell wrapper that executes node on the relative target path.
+    if let Ok(shim_bin) = locate_unix_pacm_shim() {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if dest.exists() {
+            let _ = fs::remove_file(dest);
+        }
+        fs::copy(&shim_bin, dest)?;
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(dest)?;
+        write!(f, "\nPACM_SHIM:{}\n", relative_target.to_string_lossy())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(dest)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(dest, perms)?;
+        }
+        return Ok(());
+    }
+
+    // Fallback: write a simple shell wrapper that invokes node on the relative target.
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
     if dest.exists() {
         let _ = fs::remove_file(dest);
     }
-    fs::copy(&shim_bin, dest)?;
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().append(true).open(dest)?;
-    write!(f, "\nPACM_SHIM:{}\n", relative_target.to_string_lossy())?;
+    let mut f = std::fs::File::create(dest)?;
+    // The wrapper resolves the script path relative to the .bin dir using $0.
+    // Use a POSIX-compatible sh wrapper which calls node.
+    let rel = relative_target.to_string_lossy();
+    let script = format!(
+        "#!/usr/bin/env sh\n"#
+        "basedir=$(dirname \"$0\")\n"#
+        "node \"$basedir/{rel}\" \"$@\"\n",
+        rel = rel
+    );
+    f.write_all(script.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
