@@ -70,14 +70,27 @@ impl Installer {
                     .materialize(&entry.store_entry, &dest)
                     .with_context(|| format!("materialize {} into project", entry.package.name))?;
 
-                create_bin_shims(project_root, &entry.package.name, &dest)
-                    .with_context(|| format!("create bin shims for {}", entry.package.name))?;
+                // NOTE: creating bin shims can race when performed concurrently for many
+                // packages writing into the same `node_modules/.bin` directory. Create the
+                // package files in parallel above, and then create shims serially below to
+                // avoid intermittent filesystem races on some platforms.
 
                 Ok((entry.package.name.clone(), outcome_mode))
             })
             .collect();
 
         let install_results = install_results?;
+
+        // Create `.bin` shims serially for each installed package to avoid concurrent
+        // writes into the same `.bin` directory which can be flaky on some filesystems.
+        for (package_name, _mode) in &install_results {
+            let mut dest = node_modules.clone();
+            for part in package_name.split('/') {
+                dest.push(part);
+            }
+            create_bin_shims(project_root, package_name, &dest)
+                .with_context(|| format!("create bin shims for {package_name}"))?;
+        }
         let mut outcomes = Vec::with_capacity(install_results.len());
         for (package_name, outcome_mode) in install_results {
             if let Some(entry) = plan.get(&package_name) {
