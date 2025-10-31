@@ -114,6 +114,8 @@ pub struct NpmVersion {
     pub version: String,
     pub dist: NpmDist,
     #[serde(default)]
+    pub scripts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     pub dependencies: std::collections::HashMap<String, String>,
     #[serde(default, rename = "optionalDependencies")]
     pub optional_dependencies: std::collections::HashMap<String, String>,
