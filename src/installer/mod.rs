@@ -330,9 +330,7 @@ fn write_unix_native_shim(dest: &Path, relative_target: &Path) -> Result<()> {
     // Use a POSIX-compatible sh wrapper which calls node.
     let rel = relative_target.to_string_lossy();
     let script = format!(
-        "#!/usr/bin/env sh\n"#
-        "basedir=$(dirname \"$0\")\n"#
-        "node \"$basedir/{rel}\" \"$@\"\n",
+        "#!/usr/bin/env sh\nbasedir=$(dirname \"$0\")\nnode \"$basedir/{rel}\" \"$@\"\n",
         rel = rel
     );
     f.write_all(script.as_bytes())?;
