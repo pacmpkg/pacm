@@ -1,7 +1,10 @@
 {
   "name": "my-app",
   "version": "0.1.0",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "acorn": "8.15.0"
+    "express": "5.1.0"
   }
 }

@@ -74,6 +74,35 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: PmCmd,
     },
+    /// Run lifecycle scripts for packages (preinstall/install/postinstall)
+    Scripts {
+        #[command(subcommand)]
+        cmd: ScriptsCmd,
+    },
+    /// Run a script from package.json or execute a local binary in node_modules/.bin
+    Run {
+        /// script name or binary to run; remaining args are passed-through
+        #[arg(trailing_var_arg = true, required = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScriptsCmd {
+    /// Run lifecycle scripts for packages
+    Run {
+        packages: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        ignore_scripts: bool,
+        /// Skip confirmation prompts and run immediately
+        #[arg(long)]
+        yes: bool,
+        /// Prompt for each package individually instead of a single confirmation
+        #[arg(long = "per-package")]
+        per_package: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -161,6 +190,18 @@ impl PacmCli {
                 PmCmd::Prune => commands::cmd_pm_prune(),
                 PmCmd::Ls => commands::cmd_list(),
             },
+            Some(Commands::Scripts { cmd }) => match cmd {
+                ScriptsCmd::Run { packages, all, ignore_scripts, yes, per_package } => {
+                    commands::cmd_scripts_run(
+                        packages.clone(),
+                        *all,
+                        *ignore_scripts,
+                        *yes,
+                        *per_package,
+                    )
+                }
+            },
+            Some(Commands::Run { args }) => commands::cmd_run(args.clone()),
         }
     }
 
