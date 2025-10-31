@@ -1,9 +1,9 @@
+use crate::colors::*;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
-use std::path::PathBuf;
-use crate::colors::*;
+use std::path::{Path, PathBuf};
 
-fn path_with_bin_prefix(bin_dir: &PathBuf) -> Option<OsString> {
+fn path_with_bin_prefix(bin_dir: &Path) -> Option<OsString> {
     if !bin_dir.exists() {
         return None;
     }
@@ -34,7 +34,7 @@ fn quote_arg_for_shell(arg: &str) -> String {
         // arguments like `--watch` are preserved when appended to script strings.
         if arg.contains(' ') || arg.contains('"') || arg.starts_with('-') {
             let escaped = arg.replace('"', "\\\"");
-            format!("\"{}\"", escaped)
+            format!("\"{escaped}\"")
         } else {
             arg.to_string()
         }
@@ -42,7 +42,10 @@ fn quote_arg_for_shell(arg: &str) -> String {
         // POSIX single-quote with escaping of single-quotes
         if arg.is_empty() {
             "''".to_string()
-        } else if arg.chars().all(|c| !c.is_whitespace()) && !arg.contains('"') && !arg.contains('\'') {
+        } else if arg.chars().all(|c| !c.is_whitespace())
+            && !arg.contains('"')
+            && !arg.contains('\'')
+        {
             // no whitespace and no quotes -> safe
             arg.to_string()
         } else {
@@ -115,7 +118,7 @@ pub fn cmd_run(args: Vec<String>) -> Result<()> {
         if let Some(cmd_val) = scripts.get(&first) {
             if let Some(cmd_str) = cmd_val.as_str() {
                 let final_cmd = build_script_command(cmd_str, &pass_args_vec);
-                println!("{C_GRAY}[pacm]{C_RESET} running script: {} -> {}", first, final_cmd);
+                println!("{C_GRAY}[pacm]{C_RESET} running script: {first} -> {final_cmd}");
                 let mut c = if cfg!(windows) {
                     let mut cc = std::process::Command::new("cmd");
                     cc.arg("/C").arg(&final_cmd);
@@ -132,11 +135,9 @@ pub fn cmd_run(args: Vec<String>) -> Result<()> {
                         c.env("Path", p);
                     }
                 }
-                let status = c
-                    .status()
-                    .with_context(|| format!("spawn script {}", first))?;
+                let status = c.status().with_context(|| format!("spawn script {first}"))?;
                 if !status.success() {
-                    anyhow::bail!("script {} failed", first);
+                    anyhow::bail!("script {first} failed");
                 }
                 return Ok(());
             }
@@ -148,9 +149,9 @@ pub fn cmd_run(args: Vec<String>) -> Result<()> {
         // Candidate names to try (windows: .exe, fallback no-ext; unix: direct)
         let mut candidates: Vec<PathBuf> = Vec::new();
         if cfg!(windows) {
-            candidates.push(bin_dir.join(format!("{}.exe", first)));
+            candidates.push(bin_dir.join(format!("{first}.exe")));
             candidates.push(bin_dir.join(&first));
-            candidates.push(bin_dir.join(format!("{}.cmd", first)));
+            candidates.push(bin_dir.join(format!("{first}.cmd")));
         } else {
             candidates.push(bin_dir.join(&first));
         }
@@ -169,11 +170,9 @@ pub fn cmd_run(args: Vec<String>) -> Result<()> {
                         cmd.env("Path", p);
                     }
                 }
-                let status = cmd
-                    .status()
-                    .with_context(|| format!("spawn binary {}", first))?;
+                let status = cmd.status().with_context(|| format!("spawn binary {first}"))?;
                 if !status.success() {
-                    anyhow::bail!("binary {} failed", first);
+                    anyhow::bail!("binary {first} failed");
                 }
                 return Ok(());
             }
@@ -182,7 +181,7 @@ pub fn cmd_run(args: Vec<String>) -> Result<()> {
 
     // Fallback: run as a shell command (this will use PATH which we've prefixed)
     let joined = args.join(" ");
-    println!("{C_GRAY}[pacm]{C_RESET} running shell: {}", joined);
+    println!("{C_GRAY}[pacm]{C_RESET} running shell: {joined}");
     let mut sh = if cfg!(windows) {
         let mut cc = std::process::Command::new("cmd");
         cc.arg("/C").arg(&joined);
@@ -218,7 +217,10 @@ mod tests {
         assert_eq!(quote_arg_for_shell("abc"), "abc");
         assert_eq!(quote_arg_for_shell("a b"), "'a b'");
         assert_eq!(quote_arg_for_shell("it's"), "'it'\\''s'");
-        assert_eq!(build_script_command("node build.js", &vec!["--watch".to_string()]), "node build.js '--watch'");
+        assert_eq!(
+            build_script_command("node build.js", &vec!["--watch".to_string()]),
+            "node build.js '--watch'"
+        );
     }
 
     #[test]
@@ -228,6 +230,9 @@ mod tests {
         }
         assert_eq!(quote_arg_for_shell("abc"), "abc");
         assert_eq!(quote_arg_for_shell("a b"), "\"a b\"");
-        assert_eq!(build_script_command("node build.js", &vec!["--watch".to_string()]), "node build.js \"--watch\"");
+        assert_eq!(
+            build_script_command("node build.js", &vec!["--watch".to_string()]),
+            "node build.js \"--watch\""
+        );
     }
 }
