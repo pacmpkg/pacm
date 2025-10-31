@@ -45,8 +45,11 @@ fn quote_arg_for_shell(arg: &str) -> String {
         } else if arg.chars().all(|c| !c.is_whitespace())
             && !arg.contains('"')
             && !arg.contains('\'')
+            && !arg.starts_with('-')
         {
-            // no whitespace and no quotes -> safe
+            // no whitespace, no quotes, and not a flag -> safe
+            // We intentionally quote flags (starting with '-') to preserve them
+            // when appended to scripts (matching test expectations).
             arg.to_string()
         } else {
             // escape single quotes by closing, escaping, and reopening
