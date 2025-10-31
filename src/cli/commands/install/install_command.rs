@@ -1128,7 +1128,10 @@ mod tests {
 
     #[test]
     fn scripts_run_executes_registry_scripts() -> anyhow::Result<()> {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = match TEST_MUTEX.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let sandbox = EnvSandbox::new();
         let project_root = sandbox.project_root();
 
@@ -1192,7 +1195,10 @@ mod tests {
 
     #[test]
     fn installs_cached_packages_and_updates_lock() -> anyhow::Result<()> {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = match TEST_MUTEX.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let sandbox = EnvSandbox::new();
         let project_root = sandbox.project_root();
         write_project_manifest(
@@ -1301,7 +1307,10 @@ mod tests {
 
     #[test]
     fn reinstall_prunes_removed_packages() -> anyhow::Result<()> {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = match TEST_MUTEX.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let sandbox = EnvSandbox::new();
         let project_root = sandbox.project_root();
         write_project_manifest(
@@ -1353,7 +1362,10 @@ mod tests {
 
     #[test]
     fn install_from_specs_updates_manifest() -> anyhow::Result<()> {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = match TEST_MUTEX.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let sandbox = EnvSandbox::new();
         let project_root = sandbox.project_root();
         write_project_manifest(
