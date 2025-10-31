@@ -24,7 +24,7 @@ pub fn cmd_pm_lockfile(format: String, save: bool) -> Result<()> {
     let (output, ext) = match lower.as_str() {
         "json" => (serde_json::to_string_pretty(&lock)?, "json"),
         "yaml" | "yml" => (serde_yaml::to_string(&lock)?, "yaml"),
-        other => bail!("unsupported format '{}', use 'json' or 'yaml'", other),
+        other => bail!("unsupported format '{other}', use 'json' or 'yaml'"),
     };
 
     if save {

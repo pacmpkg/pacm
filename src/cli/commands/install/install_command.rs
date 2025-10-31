@@ -77,6 +77,7 @@ struct PendingDownload {
     version: String,
     url: String,
     integrity_hint: Option<String>,
+    scripts: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -97,11 +98,21 @@ fn download_into_cache(
     version: &str,
     url: &str,
     integrity_hint: Option<&str>,
+    scripts: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<String> {
     let bytes = fetcher
         .download_tarball(url)
         .with_context(|| format!("download tarball for {name}@{version}"))?;
-    crate::cache::ensure_cached_package(name, version, &bytes, integrity_hint)
+    let integrity = crate::cache::ensure_cached_package(name, version, &bytes, integrity_hint)?;
+    // write registry scripts sidecar if provided
+    if let Some(s) = scripts {
+        let cache_path = crate::cache::cache_package_path(name, version);
+        let sidecar = cache_path.join(".registry-scripts.json");
+        if let Ok(txt) = serde_json::to_string_pretty(s) {
+            let _ = std::fs::write(&sidecar, txt);
+        }
+    }
+    Ok(integrity)
 }
 
 pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result<()> {
@@ -317,7 +328,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 && looks_like_tag;
             if is_tag_spec {
                 if prefer_offline {
-                    bail!("cannot resolve dist-tag '{}' for {} offline", range, name);
+                    bail!("cannot resolve dist-tag '{range}' for {name} offline");
                 }
                 let meta = fetcher
                     .package_metadata(&name)
@@ -334,10 +345,10 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                             .unwrap_or_default();
                         Ok((ver, tar))
                     } else {
-                        bail!("unknown dist-tag '{}' for {}", range, name);
+                        bail!("unknown dist-tag '{range}' for {name}");
                     }
                 } else {
-                    bail!("no dist-tags available for {}", name);
+                    bail!("no dist-tags available for {name}");
                 }
             } else {
                 if range.contains("||") || canon.contains("||") {
@@ -416,18 +427,28 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
         let mut package_os: Vec<String> = Vec::new();
         let mut package_cpu: Vec<String> = Vec::new();
         #[allow(clippy::type_complexity)]
-        let (integrity_owned, dep_map, opt_map, peer_map, peer_meta_map, resolved_url): (
+        let (integrity_owned, dep_map, opt_map, peer_map, peer_meta_map, resolved_url, scripts_map): (
             Option<String>,
             BTreeMap<String, String>,
             BTreeMap<String, String>,
             BTreeMap<String, String>,
             BTreeMap<String, crate::lockfile::PeerMeta>,
             Option<String>,
+            Option<std::collections::BTreeMap<String, String>>,
         ) = if tarball_url.is_empty() {
             match crate::cache::read_cached_manifest(&name, &picked_version) {
                 Ok(mut cached_mf) => {
                     package_os = std::mem::take(&mut cached_mf.os);
                     package_cpu = std::mem::take(&mut cached_mf.cpu_arch);
+                    // Try to fetch registry metadata for scripts if possible (don't if prefer_offline)
+                    let scripts = if !prefer_offline {
+                        match fetcher.package_version_metadata(&name, &picked_version) {
+                            Ok(vm) => vm.scripts.clone().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+                            Err(_) => std::collections::BTreeMap::new(),
+                        }
+                    } else {
+                        std::collections::BTreeMap::new()
+                    };
                     (
                         None,
                         cached_mf.dependencies.into_iter().collect(),
@@ -454,6 +475,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                             .map(|(k, v)| (k, crate::lockfile::PeerMeta { optional: v.optional }))
                             .collect(),
                         None,
+                        Some(scripts),
                     )
                 }
                 Err(e) => {
@@ -464,6 +486,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                             BTreeMap::new(),
                             BTreeMap::new(),
                             BTreeMap::new(),
+                            None,
                             None,
                         )
                     } else {
@@ -491,7 +514,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                     if optional_root {
                         continue;
                     } else {
-                        anyhow::bail!("version metadata missing for {}@{}", name, picked_ver);
+                        anyhow::bail!("version metadata missing for {name}@{picked_ver}");
                     }
                 }
             };
@@ -514,7 +537,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             for (n, m) in &version_meta.peer_dependencies_meta {
                 pmm.insert(n.clone(), crate::lockfile::PeerMeta { optional: m.optional });
             }
-            (integrity_owned, dm, om, pm, pmm, Some(version_meta.dist.tarball.clone()))
+            (integrity_owned, dm, om, pm, pmm, Some(version_meta.dist.tarball.clone()), Some(version_meta.scripts.clone()))
         };
 
         let resolved_for_lock = resolved_url.clone().or_else(|| {
@@ -562,11 +585,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 if optional_root {
                     continue;
                 }
-                bail!(
-                    "{name}@{ver} not in cache and --prefer-offline is set",
-                    name = name,
-                    ver = picked_ver
-                );
+                bail!("{name}@{picked_ver} not in cache and --prefer-offline is set");
             }
             let url = resolved_url
                 .as_deref()
@@ -584,6 +603,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                     &picked_version,
                     &url,
                     integrity_owned.as_deref(),
+                    scripts_map.as_ref(),
                 );
                 match download_result {
                     Ok(integrity) => {
@@ -619,6 +639,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                     version: picked_version.clone(),
                     url,
                     integrity_hint: integrity_owned.clone(),
+                    scripts: scripts_map.clone(),
                 });
                 integrity_for_entry_string = integrity_owned.clone();
             }
@@ -689,6 +710,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                     &pd.version,
                     &pd.url,
                     pd.integrity_hint.as_deref(),
+                    pd.scripts.as_ref(),
                 )?;
                 Ok((pd.name.clone(), integrity))
             })
@@ -804,6 +826,62 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     println!(
         "{C_GRAY}[pacm]{C_RESET} {C_GREEN}installed{C_RESET} {total} packages ({C_GREEN}{installed_count} downloaded{C_RESET}, {C_DIM}{reused} reused{C_RESET}) in {dur:.2?}"
     );
+    // Detect packages that declare lifecycle scripts (preinstall/install/postinstall)
+    let mut pkgs_with_scripts: Vec<String> = Vec::new();
+    for (name, plan_entry) in &plan {
+        // read store metadata JSON to inspect scripts
+        if let Ok(txt) = std::fs::read_to_string(&plan_entry.store_entry.metadata_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                if let Some(scripts) = val.get("scripts") {
+                    if scripts.get("preinstall").is_some()
+                        || scripts.get("install").is_some()
+                        || scripts.get("postinstall").is_some()
+                    {
+                        pkgs_with_scripts.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // root project scripts from local package.json
+    let mut root_has_scripts = false;
+    let local_pkg = std::path::PathBuf::from("package.json");
+    if local_pkg.exists() {
+        if let Ok(txt) = std::fs::read_to_string(&local_pkg) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                if let Some(scripts) = val.get("scripts") {
+                    if scripts.get("preinstall").is_some()
+                        || scripts.get("install").is_some()
+                        || scripts.get("postinstall").is_some()
+                    {
+                        root_has_scripts = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !pkgs_with_scripts.is_empty() || root_has_scripts {
+        println!(
+            "{C_GRAY}[pacm]{C_RESET} {C_YELLOW}note{C_RESET}: lifecycle scripts detected for some packages. pacm does not run them during 'install' by default."
+        );
+        if root_has_scripts {
+            println!(
+                "{C_GRAY}[pacm]{C_RESET} root package has lifecycle scripts defined in package.json"
+            );
+        }
+        if !pkgs_with_scripts.is_empty() {
+            println!(
+                "{C_GRAY}[pacm]{C_RESET} packages with scripts: {}",
+                pkgs_with_scripts.join(", ")
+            );
+        }
+        println!(
+            "{C_GRAY}[pacm]{C_RESET} run 'pacm scripts run --all' to execute lifecycle scripts, or 'pacm scripts run <pkg..>' to run for specific packages."
+        );
+    }
+
     Ok(())
 }
 
@@ -898,6 +976,14 @@ fn ensure_store_for_package(
         let Some(dep_version) = dep_entry.version.as_ref() else {
             continue;
         };
+        // If this dependency is optional for the parent package and the package
+        // declares an OS/CPU restriction that does not match this host, skip it.
+        if lock_entry.optional_dependencies.contains_key(&dep)
+            && !platform_supported(&dep_entry.os, &dep_entry.cpu_arch)
+        {
+            // skip optional dependency incompatible with platform
+            continue;
+        }
         let dep_store_entry = ensure_store_for_package(store, lock, &dep, memo, visiting)?;
         dep_fps.push(DependencyFingerprint {
             name: dep.clone(),
@@ -1024,6 +1110,13 @@ mod tests {
         fs::create_dir_all(&dir).expect("create cached package dir");
         let manifest_path = dir.join("package.json");
         fs::write(&manifest_path, manifest.to_string()).expect("write cached manifest");
+        // If manifest declares scripts, also write a registry sidecar so store.ensure_entry can pick it up
+        if let Some(scripts_val) = manifest.get("scripts") {
+            let sidecar_path = dir.join(".registry-scripts.json");
+            if let Ok(txt) = serde_json::to_string_pretty(scripts_val) {
+                let _ = fs::write(&sidecar_path, txt);
+            }
+        }
         for (rel, contents) in files {
             let file_path = dir.join(rel);
             if let Some(parent) = file_path.parent() {
@@ -1031,6 +1124,62 @@ mod tests {
             }
             fs::write(file_path, contents).expect("write cached file");
         }
+    }
+
+    #[test]
+    fn scripts_run_executes_registry_scripts() -> anyhow::Result<()> {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let sandbox = EnvSandbox::new();
+        let project_root = sandbox.project_root();
+
+        // platform specific echo commands
+        #[cfg(windows)]
+        let scripts = json!({
+            "preinstall": "cmd /C echo pre > pre.txt",
+            "install": "cmd /C echo inst > inst.txt",
+            "postinstall": "cmd /C echo post > post.txt",
+        });
+        #[cfg(not(windows))]
+        let scripts = json!({
+            "preinstall": "sh -c 'echo pre > pre.txt'",
+            "install": "sh -c 'echo inst > inst.txt'",
+            "postinstall": "sh -c 'echo post > post.txt'",
+        });
+
+        write_project_manifest(
+            &project_root,
+            &json!({
+                "name": "script-app",
+                "version": "0.1.0",
+                "dependencies": { "scripty": "1.0.0" }
+            }),
+        );
+
+        seed_cached_package(
+            "scripty",
+            "1.0.0",
+            json!({ "name": "scripty", "version": "1.0.0", "scripts": scripts }),
+            &[("index.js", "module.exports = 'scripty';\n")],
+        );
+
+        let _cwd = CwdGuard::change_to(&project_root)?;
+        cmd_install(Vec::new(), install_options_copy())?;
+
+        // Run scripts for package directly (auto-confirm)
+        crate::cli::commands::cmd_scripts_run(
+            vec!["scripty".to_string()],
+            false,
+            false,
+            true,
+            false,
+        )?;
+
+        let sdir = project_root.join("node_modules").join("scripty");
+        assert!(sdir.join("pre.txt").exists());
+        assert!(sdir.join("inst.txt").exists());
+        assert!(sdir.join("post.txt").exists());
+
+        Ok(())
     }
 
     fn lockfile_path(project_root: &Path) -> PathBuf {

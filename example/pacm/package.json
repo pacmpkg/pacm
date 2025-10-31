@@ -2,6 +2,7 @@
   "name": "my-app",
   "version": "0.1.0",
   "dependencies": {
-    "acorn": "8.15.0"
+    "@lumixland/ffmpeg": "0.1.0",
+    "@lumixland/ffmpeg-binaries": "0.1.0"
   }
 }

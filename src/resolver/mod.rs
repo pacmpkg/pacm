@@ -38,26 +38,22 @@ impl Resolver {
                         Ok(r) => v.push(r),
                         Err(e) => {
                             return Err(anyhow!(
-                                "invalid semver sub-range '{}' (orig '{}'): {}",
-                                pnorm,
-                                p,
-                                e
+                                "invalid semver sub-range '{pnorm}' (orig '{p}'): {e}"
                             ))
                         }
                     }
                 }
             }
             if v.is_empty() {
-                return Err(anyhow!("empty OR range '{}'", range));
+                return Err(anyhow!("empty OR range '{range}'"));
             }
             v
         } else {
             let req = if norm == "*" {
                 VersionReq::STAR
             } else {
-                VersionReq::from_str(&norm).map_err(|e| {
-                    anyhow!("invalid semver range '{}' (orig '{}'): {}", norm, range, e)
-                })?
+                VersionReq::from_str(&norm)
+                    .map_err(|e| anyhow!("invalid semver range '{norm}' (orig '{range}'): {e}"))?
             };
             vec![req]
         };
@@ -69,7 +65,7 @@ impl Resolver {
                 return Ok((ver.clone(), tarball.clone()));
             }
         }
-        Err(anyhow!("no version matches range {}", range))
+        Err(anyhow!("no version matches range {range}"))
     }
 }
 
@@ -94,8 +90,20 @@ pub fn canonicalize_npm_range(input: &str) -> String {
         return s.to_string();
     }
 
+    // Insert commas between separate comparator expressions when they are
+    // written with spaces (e.g. "^3.1.0 < 4" -> "^3.1.0, < 4"). The semver
+    // crate expects comparators to be separated by commas. This is a
+    // best-effort normalization and runs before more detailed tokenization.
+    let mut s = s.to_string();
+    // Process multi-char operators first to avoid partial matches
+    for op in &["<=", ">=", "<", ">", "=", "^", "~"] {
+        let pat = format!(" {op}");
+        let rep = format!(", {op}");
+        s = s.replace(&pat, &rep);
+    }
+
     // If it parses as a full semver (including prerelease/build), treat as exact
-    if semver::Version::parse(s).is_ok() {
+    if semver::Version::parse(&s).is_ok() {
         return format!("={s}");
     }
 
@@ -164,11 +172,11 @@ pub fn canonicalize_npm_range(input: &str) -> String {
     }
 
     // Fallback expansions for simple patterns
-    if is_numeric(s) {
+    if is_numeric(&s) {
         return format!("^{s}.0.0");
     }
     if s.ends_with(".x") || s.ends_with(".*") {
-        return expand_wildcard(s);
+        return expand_wildcard(&s);
     }
     // Try as-is; if semver crate would reject we'll let caller produce error.
     s.to_string()
@@ -215,4 +223,27 @@ fn expand_wildcard(pattern: &str) -> String {
     }
     // Fallback return original
     pattern.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_inserts_comma_between_comparators() {
+        let inp = "^3.1.0 < 4";
+        let out = canonicalize_npm_range(inp);
+        // We expect a comma to be inserted so semver can parse the comparators
+        assert_eq!(out, "^3.1.0, < 4");
+        // The semver crate should accept the normalized form
+        assert!(semver::VersionReq::parse(&out).is_ok());
+    }
+
+    #[test]
+    fn canonicalize_leaves_single_comparator() {
+        let inp = "^2.0.0";
+        let out = canonicalize_npm_range(inp);
+        assert_eq!(out, "^2.0.0");
+        assert!(semver::VersionReq::parse(&out).is_ok());
+    }
 }

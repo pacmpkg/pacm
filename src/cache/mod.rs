@@ -45,11 +45,7 @@ pub fn ensure_cached_package(
         if let Some(b64) = integrity.strip_prefix("sha512-") {
             let raw = STANDARD.decode(b64).with_context(|| "decode integrity base64")?;
             if raw != digest[..] {
-                anyhow::bail!(
-                    "integrity mismatch: expected {}, got {}",
-                    integrity,
-                    computed_integrity
-                );
+                anyhow::bail!("integrity mismatch: expected {integrity}, got {computed_integrity}");
             }
         }
     }
@@ -203,6 +199,8 @@ struct StoreMetadata {
     integrity: Option<String>,
     resolved: Option<String>,
     dependencies: Vec<StoredDependency>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub scripts: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +300,21 @@ impl CasStore {
                     store_key: d.store_key.clone(),
                 })
                 .collect(),
+            scripts: {
+                // Attempt to read registry scripts sidecar from the source_dir (cache package path)
+                let mut scripts_map = std::collections::BTreeMap::new();
+                let sidecar = params.source_dir.join(".registry-scripts.json");
+                if sidecar.exists() {
+                    if let Ok(txt) = std::fs::read_to_string(&sidecar) {
+                        if let Ok(parsed) =
+                            serde_json::from_str::<std::collections::BTreeMap<String, String>>(&txt)
+                        {
+                            scripts_map = parsed;
+                        }
+                    }
+                }
+                scripts_map
+            },
         };
         let metadata_tmp_path = tmp_target.join("metadata.json");
         write_metadata(&metadata_tmp_path, &metadata)?;
