@@ -218,6 +218,7 @@ fn create_bin_shims(project_root: &Path, package_name: &str, pkg_dest_dir: &Path
     }
     let mf: LocalMf =
         serde_json::from_str(&txt).with_context(|| "parse package.json for bin field")?;
+    let debug_shims = std::env::var("PACM_DEBUG_SHIMS").is_ok();
     let bin_field = match mf.bin {
         None => return Ok(()),
         Some(b) => b,
@@ -239,7 +240,14 @@ fn create_bin_shims(project_root: &Path, package_name: &str, pkg_dest_dir: &Path
         }
         // Absolute JS target path (under node_modules/<pkg>/...)
         let target_js_abs = normalize_pkg_path(pkg_dest_dir, &rel_path);
-        if !target_js_abs.exists() {
+        let within_pkg = target_js_abs.starts_with(pkg_dest_dir);
+        let target_exists = target_js_abs.exists();
+        if debug_shims {
+            println!(
+                "[pacm] shim debug: pkg={package_name} bin={bin_name} rel={rel_path} target_exists={target_exists} within_pkg={within_pkg}"
+            );
+        }
+        if !within_pkg {
             continue;
         }
         // Build relative JS path from .bin directory: ../<pkg>/<rel_path>

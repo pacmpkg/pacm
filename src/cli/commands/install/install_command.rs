@@ -1280,11 +1280,23 @@ mod tests {
         let options = install_options_copy();
         cmd_install(Vec::new(), options)?;
 
+        let bin_dir = project_root.join("node_modules").join(".bin");
         #[cfg(windows)]
-        let gamma_bin = project_root.join("node_modules\\.bin\\gamma-cli.exe");
+        let gamma_bin = bin_dir.join("gamma-cli.exe");
         #[cfg(not(windows))]
-        let gamma_bin = project_root.join("node_modules/.bin/gamma-cli");
-        assert!(gamma_bin.exists(), "gamma bin shim missing");
+        let gamma_bin = bin_dir.join("gamma-cli");
+        let bin_listing: Vec<String> = std::fs::read_dir(&bin_dir)
+            .map(|iter| {
+                iter.filter_map(|entry| entry.ok().and_then(|e| e.file_name().into_string().ok()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            gamma_bin.exists(),
+            "gamma bin shim missing; bin_dir_exists={} entries={:?}",
+            bin_dir.exists(),
+            bin_listing
+        );
 
         let alpha_dir = project_root.join("node_modules").join("alpha");
         assert!(alpha_dir.join("bin.js").exists());
