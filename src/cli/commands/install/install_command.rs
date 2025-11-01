@@ -1012,19 +1012,20 @@ mod tests {
     use super::*;
     use crate::cache::cache_package_path;
     use crate::lockfile::Lockfile;
+    use crate::tests::common::lock_env;
     use once_cell::sync::Lazy;
     use serde_json::json;
     use std::env;
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::tempdir;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    #[derive(Debug)]
     struct EnvSandbox {
+        _env_guard: MutexGuard<'static, ()>,
         temp: tempfile::TempDir,
         prev_xdg: Option<OsString>,
         prev_local: Option<OsString>,
@@ -1034,6 +1035,7 @@ mod tests {
 
     impl EnvSandbox {
         fn new() -> Self {
+            let env_guard = lock_env();
             let temp = tempdir().expect("create sandbox tempdir");
             let data_home = temp.path().join("data-home");
             fs::create_dir_all(&data_home).expect("create data-home dir");
@@ -1050,7 +1052,7 @@ mod tests {
             let prev_home = env::var_os("HOME");
             env::set_var("HOME", temp.path());
 
-            Self { temp, prev_xdg, prev_local, prev_appdata, prev_home }
+            Self { _env_guard: env_guard, temp, prev_xdg, prev_local, prev_appdata, prev_home }
         }
 
         fn project_root(&self) -> PathBuf {

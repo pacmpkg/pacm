@@ -1,8 +1,17 @@
+use once_cell::sync::Lazy;
 use std::env;
 use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard};
+
+static ENV_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+pub fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Guards environment variables so pacm data paths resolve inside a temporary sandbox.
 pub struct DataHomeGuard {
+    _lock: MutexGuard<'static, ()>,
     _temp: tempfile::TempDir,
     prev_xdg: Option<OsString>,
     prev_local: Option<OsString>,
@@ -13,6 +22,7 @@ pub struct DataHomeGuard {
 impl DataHomeGuard {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        let lock = lock_env();
         let temp = tempfile::tempdir().expect("create test tempdir");
         let data_home = temp.path().join("data-home");
         std::fs::create_dir_all(&data_home).expect("create data-home dir");
@@ -29,7 +39,7 @@ impl DataHomeGuard {
         let prev_home = env::var_os("HOME");
         env::set_var("HOME", temp.path());
 
-        Self { _temp: temp, prev_xdg, prev_local, prev_appdata, prev_home }
+        Self { _lock: lock, _temp: temp, prev_xdg, prev_local, prev_appdata, prev_home }
     }
 }
 
