@@ -27,7 +27,7 @@ fn path_with_bin_prefix(bin_dir: &Path) -> Option<OsString> {
     }
 }
 
-fn quote_arg_for_shell(arg: &str) -> String {
+pub(crate) fn quote_arg_for_shell(arg: &str) -> String {
     if cfg!(windows) {
         // Simple Windows quoting: wrap in double quotes if spaces or special chars
         // Quote when containing spaces/quotes or when it's a flag/option (starts with '-') so
@@ -68,7 +68,7 @@ fn quote_arg_for_shell(arg: &str) -> String {
     }
 }
 
-fn build_script_command(script: &str, pass_args: &[String]) -> String {
+pub(crate) fn build_script_command(script: &str, pass_args: &[String]) -> String {
     if pass_args.is_empty() {
         script.to_string()
     } else {
@@ -206,36 +206,4 @@ pub fn cmd_run(args: Vec<String>) -> Result<()> {
         anyhow::bail!("command failed");
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quote_unix() {
-        if cfg!(windows) {
-            return;
-        }
-        assert_eq!(quote_arg_for_shell("abc"), "abc");
-        assert_eq!(quote_arg_for_shell("a b"), "'a b'");
-        assert_eq!(quote_arg_for_shell("it's"), "'it'\\''s'");
-        assert_eq!(
-            build_script_command("node build.js", &vec!["--watch".to_string()]),
-            "node build.js '--watch'"
-        );
-    }
-
-    #[test]
-    fn quote_windows() {
-        if !cfg!(windows) {
-            return;
-        }
-        assert_eq!(quote_arg_for_shell("abc"), "abc");
-        assert_eq!(quote_arg_for_shell("a b"), "\"a b\"");
-        assert_eq!(
-            build_script_command("node build.js", &vec!["--watch".to_string()]),
-            "node build.js \"--watch\""
-        );
-    }
 }

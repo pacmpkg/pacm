@@ -224,26 +224,3 @@ fn expand_wildcard(pattern: &str) -> String {
     // Fallback return original
     pattern.to_string()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonicalize_inserts_comma_between_comparators() {
-        let inp = "^3.1.0 < 4";
-        let out = canonicalize_npm_range(inp);
-        // We expect a comma to be inserted so semver can parse the comparators
-        assert_eq!(out, "^3.1.0, < 4");
-        // The semver crate should accept the normalized form
-        assert!(semver::VersionReq::parse(&out).is_ok());
-    }
-
-    #[test]
-    fn canonicalize_leaves_single_comparator() {
-        let inp = "^2.0.0";
-        let out = canonicalize_npm_range(inp);
-        assert_eq!(out, "^2.0.0");
-        assert!(semver::VersionReq::parse(&out).is_ok());
-    }
-}
