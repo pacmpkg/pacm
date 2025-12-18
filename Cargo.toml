@@ -1,6 +1,6 @@
 [package]
 name = "pacm"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 license = "ICL-1.0"
 description = "Fast, disk-efficient, secure JavaScript/TypeScript package manager (prototype)"
