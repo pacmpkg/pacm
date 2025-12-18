@@ -112,10 +112,23 @@ jobs:
       with:
         path: artifacts
 
-    - name: Prepare release files
+    - name: Package artifacts
       run: |
         mkdir release-files
-        find artifacts -name "pacm*" -type f -exec cp {} release-files/ \;
+        # Iterate through each artifact directory
+        for dir in artifacts/*/; do
+          # Get the target name (e.g., x86_64-unknown-linux-gnu)
+          target=$(basename "$dir")
+          echo "Packaging $target..."
+          
+          if [[ "$target" == *"windows"* ]]; then
+            # Windows: Create a ZIP file
+            zip -j "release-files/pacm-${target}.zip" "$dir"/*
+          else
+            # Linux/macOS: Create a tar.gz file
+            tar -czf "release-files/pacm-${target}.tar.gz" -C "$dir" .
+          fi
+        done
 
     - name: Upload Assets to Existing Release
       uses: softprops/action-gh-release@v2
