@@ -114,6 +114,9 @@ fn enqueue_entry(entry: &PackageEntry, queue: &mut std::collections::VecDeque<St
     for dep in entry.dependencies.keys() {
         queue.push_back(dep.clone());
     }
+    for dep in entry.dev_dependencies.keys() {
+        queue.push_back(dep.clone());
+    }
     for dep in entry.optional_dependencies.keys() {
         queue.push_back(dep.clone());
     }

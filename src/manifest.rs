@@ -14,6 +14,12 @@ pub struct Manifest {
     pub optional_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependencies", skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Workspaces::is_empty")]
+    pub workspaces: Workspaces,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub os: Vec<String>,
+    #[serde(default, rename = "cpu", skip_serializing_if = "Vec::is_empty")]
+    pub cpu_arch: Vec<String>,
 }
 
 impl Manifest {
@@ -25,6 +31,38 @@ impl Manifest {
             dev_dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
             peer_dependencies: BTreeMap::new(),
+            workspaces: Workspaces::default(),
+            os: Vec::new(),
+            cpu_arch: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum Workspaces {
+    List(Vec<String>),
+    Map { #[serde(default)] packages: Vec<String> },
+}
+
+impl Default for Workspaces {
+    fn default() -> Self {
+        Workspaces::List(Vec::new())
+    }
+}
+
+impl Workspaces {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Workspaces::List(list) => list.is_empty(),
+            Workspaces::Map { packages } => packages.is_empty(),
+        }
+    }
+
+    pub fn packages(&self) -> &[String] {
+        match self {
+            Workspaces::List(list) => list.as_slice(),
+            Workspaces::Map { packages } => packages.as_slice(),
         }
     }
 }

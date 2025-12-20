@@ -16,6 +16,10 @@ pub struct PackageInstance {
     pub optional_dependencies: BTreeMap<String, String>,
     #[allow(dead_code)]
     pub peer_dependencies: BTreeMap<String, String>,
+    #[allow(dead_code)]
+    pub dev_dependencies: BTreeMap<String, String>,
+    #[allow(dead_code)]
+    pub source: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -50,7 +50,7 @@ pub fn cmd_pm_prune() -> Result<()> {
         bail!("no lockfile found to prune");
     };
 
-    if build_fast_instances(&manifest, &lock).is_some() {
+    if build_fast_instances(&manifest, &lock, &[]).is_some() {
         let removed = prune_unreachable(&mut lock);
         if !removed.is_empty() {
             remove_dirs(&removed);

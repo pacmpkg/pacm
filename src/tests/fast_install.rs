@@ -46,6 +46,8 @@ fn package_instance(name: &str, version: &str) -> PackageInstance {
         dependencies: BTreeMap::new(),
         optional_dependencies: BTreeMap::new(),
         peer_dependencies: BTreeMap::new(),
+        dev_dependencies: BTreeMap::new(),
+        source: None,
     }
 }
 

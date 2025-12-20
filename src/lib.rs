@@ -8,5 +8,6 @@ pub mod installer;
 pub mod lockfile;
 pub mod manifest;
 pub mod resolver;
+pub mod workspaces;
 #[cfg(test)]
 pub mod tests;

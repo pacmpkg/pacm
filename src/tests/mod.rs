@@ -8,3 +8,4 @@ pub mod manifest;
 pub mod manifest_updates;
 pub mod resolver;
 pub mod run;
+pub mod workspaces;

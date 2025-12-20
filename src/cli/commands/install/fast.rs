@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub(crate) fn build_fast_instances(
     manifest: &Manifest,
     lock: &Lockfile,
+    workspace_roots: &[String],
 ) -> Option<BTreeMap<String, PackageInstance>> {
     use std::collections::{HashSet, VecDeque};
     let mut needed: HashSet<String> = HashSet::new();
@@ -18,6 +19,9 @@ pub(crate) fn build_fast_instances(
     for name in manifest.optional_dependencies.keys() {
         needed.insert(name.clone());
     }
+    for name in workspace_roots {
+        needed.insert(name.clone());
+    }
     if needed.is_empty() {
         return Some(BTreeMap::new());
     }
@@ -27,6 +31,21 @@ pub(crate) fn build_fast_instances(
         let key = format!("node_modules/{name}");
         if let Some(entry) = lock.packages.get(&key) {
             for dep in entry.dependencies.keys() {
+                if needed.insert(dep.clone()) {
+                    queue.push_back(dep.clone());
+                }
+            }
+            for dep in entry.dev_dependencies.keys() {
+                if needed.insert(dep.clone()) {
+                    queue.push_back(dep.clone());
+                }
+            }
+            for dep in entry.optional_dependencies.keys() {
+                if needed.insert(dep.clone()) {
+                    queue.push_back(dep.clone());
+                }
+            }
+            for dep in entry.peer_dependencies.keys() {
                 if needed.insert(dep.clone()) {
                     queue.push_back(dep.clone());
                 }
@@ -52,6 +71,8 @@ pub(crate) fn build_fast_instances(
                 dependencies: entry.dependencies.clone(),
                 optional_dependencies: entry.optional_dependencies.clone(),
                 peer_dependencies: entry.peer_dependencies.clone(),
+                dev_dependencies: entry.dev_dependencies.clone(),
+                source: None,
             },
         );
     }

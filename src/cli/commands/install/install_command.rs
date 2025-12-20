@@ -13,9 +13,9 @@ use crate::fetch::Fetcher;
 use crate::installer::{InstallMode, InstallPlanEntry, Installer, PackageInstance};
 use crate::lockfile::{self, Lockfile, PackageEntry};
 use crate::manifest;
+use crate::workspaces::{discover_workspaces, workspace_dep_satisfies, WorkspaceInfo};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -49,6 +49,7 @@ fn write_lock_entry(
     integrity: Option<&str>,
     resolved: Option<&str>,
     dependencies: &BTreeMap<String, String>,
+    dev_dependencies: &BTreeMap<String, String>,
     optional_dependencies: &BTreeMap<String, String>,
     peer_dependencies: &BTreeMap<String, String>,
     peer_meta: &BTreeMap<String, crate::lockfile::PeerMeta>,
@@ -60,6 +61,7 @@ fn write_lock_entry(
     entry.integrity = integrity.map(|s| s.to_string());
     entry.resolved = resolved.map(|s| s.to_string());
     entry.dependencies = dependencies.clone();
+    entry.dev_dependencies = dev_dependencies.clone();
     entry.optional_dependencies = optional_dependencies.clone();
     entry.peer_dependencies = peer_dependencies.clone();
     entry.peer_dependencies_meta = peer_meta.clone();
@@ -126,20 +128,27 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
         link,
         copy,
     } = options;
-    let manifest_path = PathBuf::from("package.json");
+    let project_root = std::env::current_dir()?;
+    let manifest_path = project_root.join("package.json");
     if !manifest_path.exists() {
         println!("{C_GRAY}[pacm]{C_RESET} {C_RED}error{C_RESET} no package.json found. Run 'pacm init' first.");
         return Ok(());
     }
     let mut manifest = manifest::load(&manifest_path)?;
+    let workspaces_vec = discover_workspaces(&project_root, &manifest)?;
+    let mut workspace_map: BTreeMap<String, WorkspaceInfo> = BTreeMap::new();
+    for ws in workspaces_vec {
+        workspace_map.insert(ws.name.clone(), ws);
+    }
+    let workspace_names: Vec<String> = workspace_map.keys().cloned().collect();
 
     update_manifest_for_specs(&specs, &mut manifest, &manifest_path, dev, optional, no_save)?;
 
-    let lock_path = PathBuf::from("pacm.lockb");
+    let lock_path = project_root.join("pacm.lockb");
     let mut lock = if lock_path.exists() {
         Lockfile::load_or_default(lock_path.clone())?
     } else {
-        let legacy = PathBuf::from("pacm-lock.json");
+        let legacy = project_root.join("pacm-lock.json");
         if legacy.exists() {
             let lf = lockfile::load_json_compat(&legacy)?;
             lockfile::write(&lf, lock_path.clone())?;
@@ -156,7 +165,6 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     }
     let install_mode = if copy { InstallMode::Copy } else { InstallMode::Link };
     let store = CasStore::open()?;
-    let project_root = std::env::current_dir()?;
 
     let old_root_deps: BTreeMap<String, String> = original_lock
         .packages
@@ -191,7 +199,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     if lock == original_lock
         && added_root.is_empty()
         && removed_root.is_empty()
-        && node_modules_intact(&manifest)
+        && node_modules_intact(&manifest, &workspace_names)
     {
         println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}no dependency changes{C_RESET}");
         println!("{C_GRAY}[pacm]{C_RESET} {C_DIM}0 added, 0 removed{C_RESET}");
@@ -200,7 +208,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     }
 
     if specs.is_empty() && added_root.is_empty() {
-        if let Some(instances) = build_fast_instances(&manifest, &lock) {
+        if let Some(instances) = build_fast_instances(&manifest, &lock, &workspace_names) {
             if !removed_root.is_empty() {
                 prune_removed_from_lock(&mut lock, &removed_root);
                 remove_dirs(&removed_root);
@@ -282,6 +290,22 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     }
 
     let mut queue: VecDeque<Task> = VecDeque::new();
+    for ws in workspace_map.values() {
+        queue.push_back(Task {
+            name: ws.name.clone(),
+            range: format!("workspace:{}", ws.version),
+            optional_root: false,
+        });
+        for (n, r) in &ws.manifest.dependencies {
+            queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: false });
+        }
+        for (n, r) in &ws.manifest.dev_dependencies {
+            queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: false });
+        }
+        for (n, r) in &ws.manifest.optional_dependencies {
+            queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: true });
+        }
+    }
     if specs.is_empty() {
         for (n, r) in &manifest.dependencies {
             queue.push_back(Task { name: n.clone(), range: r.clone(), optional_root: false });
@@ -314,6 +338,91 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
         if !no_progress {
             let mut pr = progress.lock().unwrap();
             pr.render(format_status("resolving", &format!("{name}@{range}")));
+        }
+
+        if let Some(ws) = workspace_map.get(&name) {
+            let ws_version = ws.manifest.version.clone();
+            if !workspace_dep_satisfies(&range, &ws_version) {
+                if optional_root {
+                    continue;
+                }
+                bail!("workspace {name}@{ws_version} does not satisfy range {range}");
+            }
+            if visited_name_version.contains(&(name.clone(), ws_version.clone())) {
+                continue;
+            }
+            let package_os = ws.manifest.os.clone();
+            let package_cpu = ws.manifest.cpu_arch.clone();
+            let platform_ok = platform_supported(&package_os, &package_cpu);
+            let resolved_hint = Some(format!("workspace:{}", ws.relative_path));
+            if !platform_ok {
+                if optional_root {
+                    write_lock_entry(
+                        &mut lock,
+                        &name,
+                        &ws_version,
+                        None,
+                        resolved_hint.as_deref(),
+                        &ws.manifest.dependencies,
+                        &ws.manifest.dev_dependencies,
+                        &ws.manifest.optional_dependencies,
+                        &ws.manifest.peer_dependencies,
+                        &BTreeMap::new(),
+                        &package_os,
+                        &package_cpu,
+                    );
+                    visited_name_version.insert((name.clone(), ws_version.clone()));
+                    continue;
+                } else {
+                    bail!("workspace {name}@{ws_version} is not supported on this platform");
+                }
+            }
+
+            write_lock_entry(
+                &mut lock,
+                &name,
+                &ws_version,
+                None,
+                resolved_hint.as_deref(),
+                &ws.manifest.dependencies,
+                &ws.manifest.dev_dependencies,
+                &ws.manifest.optional_dependencies,
+                &ws.manifest.peer_dependencies,
+                &BTreeMap::new(),
+                &package_os,
+                &package_cpu,
+            );
+            instances.insert(
+                name.clone(),
+                PackageInstance {
+                    name: name.clone(),
+                    version: ws_version.clone(),
+                    dependencies: ws.manifest.dependencies.clone(),
+                    optional_dependencies: ws.manifest.optional_dependencies.clone(),
+                    peer_dependencies: ws.manifest.peer_dependencies.clone(),
+                    dev_dependencies: ws.manifest.dev_dependencies.clone(),
+                    source: Some(ws.dir.clone()),
+                },
+            );
+            visited_name_version.insert((name.clone(), ws_version.clone()));
+
+            let mut to_enqueue: Vec<(String, String, bool)> = Vec::new();
+            for (dn, dr) in ws.manifest.dependencies.iter() {
+                to_enqueue.push((dn.clone(), dr.clone(), false));
+            }
+            for (dn, dr) in ws.manifest.dev_dependencies.iter() {
+                to_enqueue.push((dn.clone(), dr.clone(), false));
+            }
+            for (dn, dr) in ws.manifest.optional_dependencies.iter() {
+                to_enqueue.push((dn.clone(), dr.clone(), true));
+            }
+            for (dn, dr) in ws.manifest.peer_dependencies.iter() {
+                to_enqueue.push((dn.clone(), dr.clone(), false));
+            }
+            for (dn, dr, optflag) in to_enqueue {
+                queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+            }
+            continue;
         }
 
         let picked_result: anyhow::Result<(semver::Version, String)> = (|| {
@@ -564,6 +673,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 integrity_owned.as_deref(),
                 resolved_for_lock.as_deref(),
                 &dep_map,
+                &BTreeMap::new(),
                 &opt_map,
                 &peer_map,
                 &peer_meta_map,
@@ -653,6 +763,7 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             integrity_for_entry,
             resolved_for_lock.as_deref(),
             &dep_map,
+            &BTreeMap::new(),
             &opt_map,
             &peer_map,
             &peer_meta_map,
@@ -667,6 +778,8 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 dependencies: dep_map.clone(),
                 optional_dependencies: opt_map.clone(),
                 peer_dependencies: peer_map.clone(),
+                dev_dependencies: BTreeMap::new(),
+                source: None,
             },
         );
         visited_name_version.insert((name.clone(), picked_version.clone()));
@@ -916,7 +1029,8 @@ fn ensure_store_plan(
     let mut visiting: HashSet<String> = HashSet::new();
 
     for name in instances.keys() {
-        let entry = ensure_store_for_package(store, lock, name, &mut memo, &mut visiting)?;
+        let entry =
+            ensure_store_for_package(store, lock, instances, name, &mut memo, &mut visiting)?;
         if let Some(lock_entry) = lock.packages.get_mut(&format!("node_modules/{name}")) {
             lock_entry.store_key = Some(entry.store_key.clone());
             lock_entry.content_hash = Some(entry.content_hash.clone());
@@ -940,6 +1054,7 @@ fn ensure_store_plan(
 fn ensure_store_for_package(
     store: &CasStore,
     lock: &Lockfile,
+    instances: &BTreeMap<String, PackageInstance>,
     name: &str,
     memo: &mut HashMap<String, StoreEntry>,
     visiting: &mut HashSet<String>,
@@ -962,6 +1077,7 @@ fn ensure_store_for_package(
 
     let mut dep_names: Vec<String> = Vec::new();
     dep_names.extend(lock_entry.dependencies.keys().cloned());
+    dep_names.extend(lock_entry.dev_dependencies.keys().cloned());
     dep_names.extend(lock_entry.optional_dependencies.keys().cloned());
     dep_names.extend(lock_entry.peer_dependencies.keys().cloned());
     dep_names.sort();
@@ -984,7 +1100,8 @@ fn ensure_store_for_package(
             // skip optional dependency incompatible with platform
             continue;
         }
-        let dep_store_entry = ensure_store_for_package(store, lock, &dep, memo, visiting)?;
+        let dep_store_entry =
+            ensure_store_for_package(store, lock, instances, &dep, memo, visiting)?;
         dep_fps.push(DependencyFingerprint {
             name: dep.clone(),
             version: dep_version.clone(),
@@ -992,7 +1109,11 @@ fn ensure_store_for_package(
         });
     }
 
-    let source_dir = crate::cache::cache_package_path(name, &version);
+    let source_dir = if let Some(inst) = instances.get(name) {
+        inst.source.clone().unwrap_or_else(|| crate::cache::cache_package_path(name, &version))
+    } else {
+        crate::cache::cache_package_path(name, &version)
+    };
     let params = EnsureParams {
         name,
         version: &version,
