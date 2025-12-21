@@ -20,6 +20,10 @@ static META_CACHE: Lazy<Mutex<HashMap<String, NpmMetadata>>> =
 static VERSION_META_CACHE: Lazy<Mutex<HashMap<String, NpmVersion>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+pub fn http_client() -> &'static Client {
+    &CLIENT
+}
+
 #[derive(Debug, Clone)]
 pub struct Fetcher {
     registry: String,

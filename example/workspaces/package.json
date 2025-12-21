@@ -1,0 +1,9 @@
+{
+  "name": "lumix-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "@lumix/api": "workspace:^1.0.0"
+  }
+}

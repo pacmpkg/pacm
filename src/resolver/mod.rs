@@ -1,3 +1,5 @@
+pub mod spec;
+
 use anyhow::{anyhow, Result};
 use semver::{Version, VersionReq};
 use std::collections::BTreeMap;

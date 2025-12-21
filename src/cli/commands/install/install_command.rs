@@ -7,17 +7,22 @@ use super::prune::{
     cleanup_empty_node_modules_dir, lockfile_has_no_packages, prune_removed_from_lock,
     prune_unreachable, remove_dirs,
 };
-use crate::cache::{CasStore, DependencyFingerprint, EnsureParams, StoreEntry};
+use crate::cache::{CasStore, CachedManifest, DependencyFingerprint, EnsureParams, StoreEntry};
 use crate::colors::*;
 use crate::fetch::Fetcher;
 use crate::installer::{InstallMode, InstallPlanEntry, Installer, PackageInstance};
 use crate::lockfile::{self, Lockfile, PackageEntry};
 use crate::manifest;
+use crate::resolver::spec::PackageSpec;
 use crate::workspaces::{discover_workspaces, workspace_dep_satisfies, WorkspaceInfo};
 use anyhow::{anyhow, bail, Context, Result};
+use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tar::Archive;
 
 use rayon::prelude::*;
 
@@ -80,6 +85,123 @@ struct PendingDownload {
     url: String,
     integrity_hint: Option<String>,
     scripts: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct GithubResolved {
+    tarball_url: String,
+    commit: String,
+}
+
+fn resolve_github_tarball(spec: &crate::resolver::spec::GithubSpec) -> Result<GithubResolved> {
+    #[derive(serde::Deserialize)]
+    struct RepoInfo {
+        default_branch: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CommitInfo {
+        sha: String,
+    }
+
+    let client = crate::fetch::http_client();
+    let base = format!("https://api.github.com/repos/{}/{}", spec.owner, spec.repo);
+    let reference = if let Some(r) = &spec.reference {
+        r.clone()
+    } else {
+        let resp = client
+            .get(&base)
+            .send()
+            .with_context(|| format!("GET {base}"))?;
+        if resp.status().is_success() {
+            let info: RepoInfo = resp.json()?;
+            info.default_branch.unwrap_or_else(|| "main".to_string())
+        } else {
+            // Fall back to common defaults if API rate limits or errors
+            "main".to_string()
+        }
+    };
+
+    let commit_url = format!("{base}/commits/{reference}");
+    let resp = client
+        .get(&commit_url)
+        .send()
+        .with_context(|| format!("GET {commit_url}"))?;
+    if !resp.status().is_success() {
+        // Last-resort fallback to master if main/default failed
+        if reference != "master" {
+            let fallback_url = format!("{base}/commits/master");
+            let resp_fb = client
+                .get(&fallback_url)
+                .send()
+                .with_context(|| format!("GET {fallback_url}"))?;
+            if resp_fb.status().is_success() {
+                let commit: CommitInfo = resp_fb.json()?;
+                let tarball_url = format!(
+                    "https://codeload.github.com/{}/{}/tar.gz/{}",
+                    spec.owner, spec.repo, commit.sha
+                );
+                return Ok(GithubResolved { tarball_url, commit: commit.sha });
+            }
+        }
+        anyhow::bail!("failed to resolve GitHub ref {reference} for {}/{}", spec.owner, spec.repo);
+    }
+
+    let commit: CommitInfo = resp.json()?;
+    let tarball_url = format!(
+        "https://codeload.github.com/{}/{}/tar.gz/{}",
+        spec.owner, spec.repo, commit.sha
+    );
+    Ok(GithubResolved { tarball_url, commit: commit.sha })
+}
+
+fn read_manifest_from_tarball(bytes: &[u8]) -> Result<CachedManifest> {
+    let gz = GzDecoder::new(bytes);
+    let mut ar = Archive::new(gz);
+    for entry in ar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        if path.file_name().map(|n| n == "package.json").unwrap_or(false) {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf)?;
+            let mf: CachedManifest = serde_json::from_str(&buf)?;
+            return Ok(mf);
+        }
+    }
+    anyhow::bail!("package.json not found in tarball")
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{:02x}", byte));
+    }
+    hex.chars().take(8).collect()
+}
+
+fn append_build(base: &str, build_tag: &str) -> String {
+    if base.contains('+') {
+        format!("{base}.{build_tag}")
+    } else {
+        format!("{base}+{build_tag}")
+    }
+}
+
+fn write_scripts_sidecar(
+    package: &str,
+    version: &str,
+    scripts: &BTreeMap<String, String>,
+) {
+    if scripts.is_empty() {
+        return;
+    }
+    let sidecar = crate::cache::cache_package_path(package, version).join(".registry-scripts.json");
+    if let Ok(txt) = serde_json::to_string_pretty(scripts) {
+        let _ = std::fs::write(sidecar, txt);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -279,7 +401,8 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
         }
     }
 
-    let fetcher = Fetcher::new(None)?;
+    let registry_override = std::env::var("PACM_REGISTRY").ok();
+    let fetcher = Fetcher::new(registry_override)?;
     let resolver = crate::resolver::Resolver::new();
 
     #[derive(Clone)]
@@ -424,6 +547,289 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             }
             continue;
         }
+
+        let spec_kind = PackageSpec::parse(&range);
+
+        if let PackageSpec::Github(gh_spec) = &spec_kind {
+            if !no_progress {
+                let mut pr = progress.lock().unwrap();
+                pr.render(format_status("resolving", &format!("{name} (github)")));
+            }
+
+            let resolved = match resolve_github_tarball(gh_spec) {
+                Ok(r) => r,
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            let bytes = match fetcher.download_tarball(&resolved.tarball_url) {
+                Ok(b) => b,
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            let manifest_from_tar = match read_manifest_from_tarball(&bytes) {
+                Ok(mf) => mf,
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            let base_version = manifest_from_tar.version.clone().unwrap_or_else(|| "0.0.0".into());
+            let short = resolved.commit.chars().take(8).collect::<String>();
+            let picked_version = append_build(&base_version, &format!("git.{short}"));
+            let cache_exists = crate::cache::cache_package_path(&name, &picked_version).exists();
+            let integrity_for_entry_string = match crate::cache::ensure_cached_package(
+                &name,
+                &picked_version,
+                &bytes,
+                None,
+            ) {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            write_scripts_sidecar(&name, &picked_version, &manifest_from_tar.scripts);
+
+            let package_os = manifest_from_tar.os.clone();
+            let package_cpu = manifest_from_tar.cpu_arch.clone();
+            let platform_ok = platform_supported(&package_os, &package_cpu);
+            if !platform_ok {
+                if optional_root {
+                    write_lock_entry(
+                        &mut lock,
+                        &name,
+                        &picked_version,
+                        integrity_for_entry_string.as_deref(),
+                        Some(resolved.tarball_url.as_str()),
+                        &manifest_from_tar.dependencies,
+                        &BTreeMap::new(),
+                        &manifest_from_tar.optional_dependencies,
+                        &manifest_from_tar.peer_dependencies,
+                        &manifest_from_tar
+                            .peer_dependencies_meta
+                            .into_iter()
+                            .map(|(k, v)| (k, crate::lockfile::PeerMeta { optional: v.optional }))
+                            .collect(),
+                        &package_os,
+                        &package_cpu,
+                    );
+                    visited_name_version.insert((name.clone(), picked_version.clone()));
+                    continue;
+                }
+                bail!("{}@{} is not supported on this platform", name, picked_version);
+            }
+
+            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> =
+                manifest_from_tar
+                    .peer_dependencies_meta
+                    .iter()
+                    .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
+                    .collect();
+
+            write_lock_entry(
+                &mut lock,
+                &name,
+                &picked_version,
+                integrity_for_entry_string.as_deref(),
+                Some(resolved.tarball_url.as_str()),
+                &manifest_from_tar.dependencies,
+                &BTreeMap::new(),
+                &manifest_from_tar.optional_dependencies,
+                &manifest_from_tar.peer_dependencies,
+                &peer_meta_map,
+                &package_os,
+                &package_cpu,
+            );
+
+            instances.insert(
+                name.clone(),
+                PackageInstance {
+                    name: name.clone(),
+                    version: picked_version.clone(),
+                    dependencies: manifest_from_tar.dependencies.clone(),
+                    optional_dependencies: manifest_from_tar.optional_dependencies.clone(),
+                    peer_dependencies: manifest_from_tar.peer_dependencies.clone(),
+                    dev_dependencies: BTreeMap::new(),
+                    source: None,
+                },
+            );
+            visited_name_version.insert((name.clone(), picked_version.clone()));
+            if !cache_exists {
+                installed_count += 1;
+            }
+
+            let mut to_enqueue: Vec<(String, String, bool)> = Vec::new();
+            for (dn, dr) in manifest_from_tar.dependencies.into_iter() {
+                to_enqueue.push((dn, dr, optional_root));
+            }
+            for (dn, dr) in manifest_from_tar.optional_dependencies.into_iter() {
+                to_enqueue.push((dn, dr, true));
+            }
+            for (dn, dr) in manifest_from_tar.peer_dependencies.into_iter() {
+                let is_optional_peer = peer_meta_map.get(&dn).map(|m| m.optional).unwrap_or(false);
+                if !is_optional_peer {
+                    to_enqueue.push((dn, dr, false));
+                }
+            }
+            for (dn, dr, optflag) in to_enqueue {
+                queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+            }
+            continue;
+        }
+
+        if let PackageSpec::Tarball { url } = &spec_kind {
+            if !no_progress {
+                let mut pr = progress.lock().unwrap();
+                pr.render(format_status("resolving", &format!("{name} (tarball)")));
+            }
+
+            let bytes = match fetcher.download_tarball(url) {
+                Ok(b) => b,
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            let manifest_from_tar = match read_manifest_from_tarball(&bytes) {
+                Ok(mf) => mf,
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            let base_version = manifest_from_tar.version.clone().unwrap_or_else(|| "0.0.0".into());
+            let version_tag = append_build(&base_version, &format!("remote.{}", short_hash(url)));
+            let cache_exists = crate::cache::cache_package_path(&name, &version_tag).exists();
+            let integrity_for_entry_string = match crate::cache::ensure_cached_package(
+                &name,
+                &version_tag,
+                &bytes,
+                None,
+            ) {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    if optional_root {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+            write_scripts_sidecar(&name, &version_tag, &manifest_from_tar.scripts);
+
+            let package_os = manifest_from_tar.os.clone();
+            let package_cpu = manifest_from_tar.cpu_arch.clone();
+            let platform_ok = platform_supported(&package_os, &package_cpu);
+            if !platform_ok {
+                if optional_root {
+                    write_lock_entry(
+                        &mut lock,
+                        &name,
+                        &version_tag,
+                        integrity_for_entry_string.as_deref(),
+                        Some(url.as_str()),
+                        &manifest_from_tar.dependencies,
+                        &BTreeMap::new(),
+                        &manifest_from_tar.optional_dependencies,
+                        &manifest_from_tar.peer_dependencies,
+                        &manifest_from_tar
+                            .peer_dependencies_meta
+                            .into_iter()
+                            .map(|(k, v)| (k, crate::lockfile::PeerMeta { optional: v.optional }))
+                            .collect(),
+                        &package_os,
+                        &package_cpu,
+                    );
+                    visited_name_version.insert((name.clone(), version_tag.clone()));
+                    continue;
+                }
+                bail!("{}@{} is not supported on this platform", name, version_tag);
+            }
+
+            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> =
+                manifest_from_tar
+                    .peer_dependencies_meta
+                    .iter()
+                    .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
+                    .collect();
+
+            write_lock_entry(
+                &mut lock,
+                &name,
+                &version_tag,
+                integrity_for_entry_string.as_deref(),
+                Some(url.as_str()),
+                &manifest_from_tar.dependencies,
+                &BTreeMap::new(),
+                &manifest_from_tar.optional_dependencies,
+                &manifest_from_tar.peer_dependencies,
+                &peer_meta_map,
+                &package_os,
+                &package_cpu,
+            );
+
+            instances.insert(
+                name.clone(),
+                PackageInstance {
+                    name: name.clone(),
+                    version: version_tag.clone(),
+                    dependencies: manifest_from_tar.dependencies.clone(),
+                    optional_dependencies: manifest_from_tar.optional_dependencies.clone(),
+                    peer_dependencies: manifest_from_tar.peer_dependencies.clone(),
+                    dev_dependencies: BTreeMap::new(),
+                    source: None,
+                },
+            );
+            visited_name_version.insert((name.clone(), version_tag.clone()));
+            if !cache_exists {
+                installed_count += 1;
+            }
+
+            let mut to_enqueue: Vec<(String, String, bool)> = Vec::new();
+            for (dn, dr) in manifest_from_tar.dependencies.into_iter() {
+                to_enqueue.push((dn, dr, optional_root));
+            }
+            for (dn, dr) in manifest_from_tar.optional_dependencies.into_iter() {
+                to_enqueue.push((dn, dr, true));
+            }
+            for (dn, dr) in manifest_from_tar.peer_dependencies.into_iter() {
+                let is_optional_peer = peer_meta_map.get(&dn).map(|m| m.optional).unwrap_or(false);
+                if !is_optional_peer {
+                    to_enqueue.push((dn, dr, false));
+                }
+            }
+            for (dn, dr, optflag) in to_enqueue {
+                queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+            }
+            continue;
+        }
+
+        let range = match spec_kind {
+            PackageSpec::Registry { range } => range,
+            _ => range,
+        };
 
         let picked_result: anyhow::Result<(semver::Version, String)> = (|| {
             let cached = crate::cache::cached_versions(&name);

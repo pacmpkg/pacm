@@ -196,3 +196,71 @@ fn resolves_workspace_dependency_by_version_range() -> Result<()> {
     assert!(nm.join("pkg-a").exists());
     Ok(())
 }
+
+#[test]
+fn installs_scoped_workspace_chain() -> Result<()> {
+    let _guard = DataHomeGuard::new();
+    let temp = tempdir()?;
+    let project_root = temp.path().join("lumix");
+
+    write_manifest(
+        &project_root.join("package.json"),
+        &json!({
+            "name": "lumix-platform",
+            "version": "0.1.0",
+            "workspaces": ["packages/*"],
+            "dependencies": { "@lumix/api": "workspace:^1.0.0" }
+        }),
+    );
+
+    let logger_dir = project_root.join("packages").join("logger");
+    write_manifest(
+        &logger_dir.join("package.json"),
+        &json!({ "name": "@lumix/logger", "version": "1.0.0", "main": "index.js" }),
+    );
+    fs::write(logger_dir.join("index.js"), "module.exports.log = (m) => console.log('[lumix]', m);\n")?;
+
+    let api_dir = project_root.join("packages").join("api");
+    write_manifest(
+        &api_dir.join("package.json"),
+        &json!({
+            "name": "@lumix/api",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": { "@lumix/logger": "workspace:^1.0.0" }
+        }),
+    );
+    fs::write(
+        api_dir.join("index.js"),
+        "const { log } = require('@lumix/logger');\nmodule.exports = { ping: () => log('api up') };\n",
+    )?;
+
+    let _cwd = CwdGuard::change_to(&project_root)?;
+    cmd_install(Vec::new(), install_options_copy())?;
+
+    let lock = Lockfile::load_or_default(lockfile_path(&project_root))?;
+    let api_entry = lock.packages.get("node_modules/@lumix/api").expect("api lock entry");
+    assert_eq!(api_entry.version.as_deref(), Some("1.0.0"));
+    assert!(api_entry
+        .resolved
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("workspace:"));
+    assert_eq!(api_entry.dependencies.get("@lumix/logger").map(|s| s.as_str()), Some("workspace:^1.0.0"));
+
+    let logger_entry = lock
+        .packages
+        .get("node_modules/@lumix/logger")
+        .expect("logger lock entry");
+    assert_eq!(logger_entry.version.as_deref(), Some("1.0.0"));
+    assert!(logger_entry
+        .resolved
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("workspace:"));
+
+    let nm = project_root.join("node_modules");
+    assert!(nm.join("@lumix").join("api").exists());
+    assert!(nm.join("@lumix").join("logger").exists());
+    Ok(())
+}

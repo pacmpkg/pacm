@@ -144,6 +144,8 @@ pub struct CachedManifest {
     #[serde(default)]
     pub bin: Option<BinField>,
     #[serde(default)]
+    pub scripts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     pub os: Vec<String>,
     #[serde(default, rename = "cpu")]
     pub cpu_arch: Vec<String>,

@@ -1,5 +1,6 @@
 use crate::fetch::Fetcher;
 use crate::manifest::{self, Manifest};
+use crate::resolver::spec::{guess_name_from_spec, PackageSpec};
 use anyhow::{Context, Result};
 
 pub(super) fn update_manifest_for_specs(
@@ -14,7 +15,12 @@ pub(super) fn update_manifest_for_specs(
         return Ok(());
     }
 
-    let fetcher = if no_save { None } else { Some(Fetcher::new(None)?) };
+    let registry_override = std::env::var("PACM_REGISTRY").ok();
+    let fetcher = if no_save {
+        None
+    } else {
+        Some(Fetcher::new(registry_override).with_context(|| "create fetcher")?)
+    };
 
     for spec in specs {
         let (name, req) = parse_spec(spec);
@@ -42,6 +48,9 @@ pub(super) fn update_manifest_for_specs(
 }
 
 pub fn parse_spec(spec: &str) -> (String, String) {
+    if let Some(guessed) = guess_name_from_spec(spec) {
+        return (guessed, spec.to_string());
+    }
     if spec.starts_with('@') {
         if let Some(idx) = spec.rfind('@') {
             if idx == 0 {
@@ -64,6 +73,9 @@ fn resolve_version_for_manifest(
     fetcher: Option<&Fetcher>,
 ) -> Result<String> {
     let req_trimmed = req.trim();
+    if !matches!(PackageSpec::parse(req_trimmed), PackageSpec::Registry { .. }) {
+        return Ok(req_trimmed.to_string());
+    }
     let cached_versions = crate::cache::cached_versions(name);
 
     if req_trimmed == "*" {

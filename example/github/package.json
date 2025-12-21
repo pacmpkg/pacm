@@ -1,0 +1,7 @@
+{
+  "name": "my-app",
+  "version": "0.1.0",
+  "dependencies": {
+    "better-erela.js-deezer": "Tomato6966/better-erela.js-deezer"
+  }
+}
