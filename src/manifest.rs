@@ -42,7 +42,10 @@ impl Manifest {
 #[serde(untagged)]
 pub enum Workspaces {
     List(Vec<String>),
-    Map { #[serde(default)] packages: Vec<String> },
+    Map {
+        #[serde(default)]
+        packages: Vec<String>,
+    },
 }
 
 impl Default for Workspaces {

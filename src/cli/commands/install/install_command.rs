@@ -7,7 +7,7 @@ use super::prune::{
     cleanup_empty_node_modules_dir, lockfile_has_no_packages, prune_removed_from_lock,
     prune_unreachable, remove_dirs,
 };
-use crate::cache::{CasStore, CachedManifest, DependencyFingerprint, EnsureParams, StoreEntry};
+use crate::cache::{CachedManifest, CasStore, DependencyFingerprint, EnsureParams, StoreEntry};
 use crate::colors::*;
 use crate::fetch::Fetcher;
 use crate::installer::{InstallMode, InstallPlanEntry, Installer, PackageInstance};
@@ -109,10 +109,7 @@ fn resolve_github_tarball(spec: &crate::resolver::spec::GithubSpec) -> Result<Gi
     let reference = if let Some(r) = &spec.reference {
         r.clone()
     } else {
-        let resp = client
-            .get(&base)
-            .send()
-            .with_context(|| format!("GET {base}"))?;
+        let resp = client.get(&base).send().with_context(|| format!("GET {base}"))?;
         if resp.status().is_success() {
             let info: RepoInfo = resp.json()?;
             info.default_branch.unwrap_or_else(|| "main".to_string())
@@ -123,18 +120,13 @@ fn resolve_github_tarball(spec: &crate::resolver::spec::GithubSpec) -> Result<Gi
     };
 
     let commit_url = format!("{base}/commits/{reference}");
-    let resp = client
-        .get(&commit_url)
-        .send()
-        .with_context(|| format!("GET {commit_url}"))?;
+    let resp = client.get(&commit_url).send().with_context(|| format!("GET {commit_url}"))?;
     if !resp.status().is_success() {
         // Last-resort fallback to master if main/default failed
         if reference != "master" {
             let fallback_url = format!("{base}/commits/master");
-            let resp_fb = client
-                .get(&fallback_url)
-                .send()
-                .with_context(|| format!("GET {fallback_url}"))?;
+            let resp_fb =
+                client.get(&fallback_url).send().with_context(|| format!("GET {fallback_url}"))?;
             if resp_fb.status().is_success() {
                 let commit: CommitInfo = resp_fb.json()?;
                 let tarball_url = format!(
@@ -148,10 +140,8 @@ fn resolve_github_tarball(spec: &crate::resolver::spec::GithubSpec) -> Result<Gi
     }
 
     let commit: CommitInfo = resp.json()?;
-    let tarball_url = format!(
-        "https://codeload.github.com/{}/{}/tar.gz/{}",
-        spec.owner, spec.repo, commit.sha
-    );
+    let tarball_url =
+        format!("https://codeload.github.com/{}/{}/tar.gz/{}", spec.owner, spec.repo, commit.sha);
     Ok(GithubResolved { tarball_url, commit: commit.sha })
 }
 
@@ -190,11 +180,7 @@ fn append_build(base: &str, build_tag: &str) -> String {
     }
 }
 
-fn write_scripts_sidecar(
-    package: &str,
-    version: &str,
-    scripts: &BTreeMap<String, String>,
-) {
+fn write_scripts_sidecar(package: &str, version: &str, scripts: &BTreeMap<String, String>) {
     if scripts.is_empty() {
         return;
     }
@@ -590,20 +576,16 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             let short = resolved.commit.chars().take(8).collect::<String>();
             let picked_version = append_build(&base_version, &format!("git.{short}"));
             let cache_exists = crate::cache::cache_package_path(&name, &picked_version).exists();
-            let integrity_for_entry_string = match crate::cache::ensure_cached_package(
-                &name,
-                &picked_version,
-                &bytes,
-                None,
-            ) {
-                Ok(i) => Some(i),
-                Err(e) => {
-                    if optional_root {
-                        continue;
+            let integrity_for_entry_string =
+                match crate::cache::ensure_cached_package(&name, &picked_version, &bytes, None) {
+                    Ok(i) => Some(i),
+                    Err(e) => {
+                        if optional_root {
+                            continue;
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
-            };
+                };
 
             write_scripts_sidecar(&name, &picked_version, &manifest_from_tar.scripts);
 
@@ -636,12 +618,11 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 bail!("{}@{} is not supported on this platform", name, picked_version);
             }
 
-            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> =
-                manifest_from_tar
-                    .peer_dependencies_meta
-                    .iter()
-                    .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
-                    .collect();
+            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> = manifest_from_tar
+                .peer_dependencies_meta
+                .iter()
+                .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
+                .collect();
 
             write_lock_entry(
                 &mut lock,
@@ -723,20 +704,16 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             let base_version = manifest_from_tar.version.clone().unwrap_or_else(|| "0.0.0".into());
             let version_tag = append_build(&base_version, &format!("remote.{}", short_hash(url)));
             let cache_exists = crate::cache::cache_package_path(&name, &version_tag).exists();
-            let integrity_for_entry_string = match crate::cache::ensure_cached_package(
-                &name,
-                &version_tag,
-                &bytes,
-                None,
-            ) {
-                Ok(i) => Some(i),
-                Err(e) => {
-                    if optional_root {
-                        continue;
+            let integrity_for_entry_string =
+                match crate::cache::ensure_cached_package(&name, &version_tag, &bytes, None) {
+                    Ok(i) => Some(i),
+                    Err(e) => {
+                        if optional_root {
+                            continue;
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
-            };
+                };
             write_scripts_sidecar(&name, &version_tag, &manifest_from_tar.scripts);
 
             let package_os = manifest_from_tar.os.clone();
@@ -768,12 +745,11 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 bail!("{}@{} is not supported on this platform", name, version_tag);
             }
 
-            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> =
-                manifest_from_tar
-                    .peer_dependencies_meta
-                    .iter()
-                    .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
-                    .collect();
+            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> = manifest_from_tar
+                .peer_dependencies_meta
+                .iter()
+                .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
+                .collect();
 
             write_lock_entry(
                 &mut lock,

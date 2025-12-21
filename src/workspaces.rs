@@ -29,7 +29,9 @@ pub fn discover_workspaces(root: &Path, manifest: &Manifest) -> Result<Vec<Works
         }
         let abs_pattern = root.join(pattern);
         let pat_str = abs_pattern.to_string_lossy().replace('\\', "/");
-        for entry in glob(&pat_str).with_context(|| format!("expand workspace pattern {pat_str}"))? {
+        for entry in
+            glob(&pat_str).with_context(|| format!("expand workspace pattern {pat_str}"))?
+        {
             let path = match entry {
                 Ok(p) => p,
                 Err(e) => return Err(e.into()),
@@ -50,14 +52,13 @@ pub fn discover_workspaces(root: &Path, manifest: &Manifest) -> Result<Vec<Works
             if !manifest_path.exists() {
                 continue;
             }
-            let canon = manifest_path
-                .canonicalize()
-                .unwrap_or_else(|_| manifest_path.clone());
+            let canon = manifest_path.canonicalize().unwrap_or_else(|_| manifest_path.clone());
             if !seen_dirs.insert(canon.clone()) {
                 continue;
             }
-            let pkg_manifest = manifest::load(&manifest_path)
-                .with_context(|| format!("load workspace manifest at {}", manifest_path.display()))?;
+            let pkg_manifest = manifest::load(&manifest_path).with_context(|| {
+                format!("load workspace manifest at {}", manifest_path.display())
+            })?;
             if pkg_manifest.name.is_empty() {
                 anyhow::bail!("workspace at {} has empty name", manifest_path.display());
             }

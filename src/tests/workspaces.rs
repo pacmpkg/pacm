@@ -86,16 +86,10 @@ fn installs_workspace_package_and_links_it() -> Result<()> {
     cmd_install(Vec::new(), install_options_copy())?;
 
     let lock = Lockfile::load_or_default(lockfile_path(&project_root))?;
-    let entry = lock
-        .packages
-        .get("node_modules/pkg-a")
-        .expect("workspace package recorded in lockfile");
+    let entry =
+        lock.packages.get("node_modules/pkg-a").expect("workspace package recorded in lockfile");
     assert_eq!(entry.version.as_deref(), Some("1.2.3"));
-    assert!(entry
-        .resolved
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("workspace:"));
+    assert!(entry.resolved.as_deref().unwrap_or_default().starts_with("workspace:"));
 
     let installed_pkg = project_root.join("node_modules").join("pkg-a");
     assert!(installed_pkg.join("package.json").exists());
@@ -164,10 +158,7 @@ fn resolves_workspace_dependency_by_version_range() -> Result<()> {
     );
 
     let pkg_b = project_root.join("packages").join("pkg-b");
-    write_manifest(
-        &pkg_b.join("package.json"),
-        &json!({ "name": "pkg-b", "version": "1.0.0" }),
-    );
+    write_manifest(&pkg_b.join("package.json"), &json!({ "name": "pkg-b", "version": "1.0.0" }));
 
     let pkg_a = project_root.join("packages").join("pkg-a");
     write_manifest(
@@ -185,11 +176,7 @@ fn resolves_workspace_dependency_by_version_range() -> Result<()> {
     let lock = Lockfile::load_or_default(lockfile_path(&project_root))?;
     let b_entry = lock.packages.get("node_modules/pkg-b").expect("pkg-b in lock");
     assert_eq!(b_entry.version.as_deref(), Some("1.0.0"));
-    assert!(b_entry
-        .resolved
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("workspace:"));
+    assert!(b_entry.resolved.as_deref().unwrap_or_default().starts_with("workspace:"));
 
     let nm = project_root.join("node_modules");
     assert!(nm.join("pkg-b").exists());
@@ -218,7 +205,10 @@ fn installs_scoped_workspace_chain() -> Result<()> {
         &logger_dir.join("package.json"),
         &json!({ "name": "@lumix/logger", "version": "1.0.0", "main": "index.js" }),
     );
-    fs::write(logger_dir.join("index.js"), "module.exports.log = (m) => console.log('[lumix]', m);\n")?;
+    fs::write(
+        logger_dir.join("index.js"),
+        "module.exports.log = (m) => console.log('[lumix]', m);\n",
+    )?;
 
     let api_dir = project_root.join("packages").join("api");
     write_manifest(
@@ -241,23 +231,15 @@ fn installs_scoped_workspace_chain() -> Result<()> {
     let lock = Lockfile::load_or_default(lockfile_path(&project_root))?;
     let api_entry = lock.packages.get("node_modules/@lumix/api").expect("api lock entry");
     assert_eq!(api_entry.version.as_deref(), Some("1.0.0"));
-    assert!(api_entry
-        .resolved
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("workspace:"));
-    assert_eq!(api_entry.dependencies.get("@lumix/logger").map(|s| s.as_str()), Some("workspace:^1.0.0"));
+    assert!(api_entry.resolved.as_deref().unwrap_or_default().starts_with("workspace:"));
+    assert_eq!(
+        api_entry.dependencies.get("@lumix/logger").map(|s| s.as_str()),
+        Some("workspace:^1.0.0")
+    );
 
-    let logger_entry = lock
-        .packages
-        .get("node_modules/@lumix/logger")
-        .expect("logger lock entry");
+    let logger_entry = lock.packages.get("node_modules/@lumix/logger").expect("logger lock entry");
     assert_eq!(logger_entry.version.as_deref(), Some("1.0.0"));
-    assert!(logger_entry
-        .resolved
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("workspace:"));
+    assert!(logger_entry.resolved.as_deref().unwrap_or_default().starts_with("workspace:"));
 
     let nm = project_root.join("node_modules");
     assert!(nm.join("@lumix").join("api").exists());
