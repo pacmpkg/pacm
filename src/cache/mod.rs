@@ -155,6 +155,7 @@ pub struct CachedManifest {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
+#[allow(dead_code)]
 enum MapOrSeq {
     Map(std::collections::BTreeMap<String, String>),
     Seq(Vec<serde_json::Value>),

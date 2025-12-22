@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use walkdir::WalkDir;
 
+type ProgressCallback = Arc<dyn Fn(usize, usize, &str) + Send + Sync>;
+
 #[derive(Debug, Clone)]
 pub struct PackageInstance {
     pub name: String,
@@ -70,7 +72,7 @@ impl Installer {
         lock: &mut Lockfile,
         hoist_roots: &std::collections::HashSet<String>,
         workspace_folder_paths: &std::collections::HashSet<String>,
-        on_progress: Option<Arc<dyn Fn(usize, usize, &str) + Send + Sync>>,
+        on_progress: Option<ProgressCallback>,
     ) -> Result<Vec<InstallOutcome>> {
         let node_modules = project_root.join("node_modules");
         let pacm_root = node_modules.join(".pacm");
@@ -318,8 +320,8 @@ fn try_symlink_dir(from: &Path, to: &Path) -> Result<bool> {
     {
         use std::os::unix::fs::symlink;
         match symlink(from, to) {
-            Ok(_) => return Ok(true),
-            Err(_) => return Ok(false),
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
         }
     }
     #[cfg(windows)]
