@@ -8,7 +8,8 @@ use std::time::Duration;
 
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
-        .timeout(Duration::from_secs(30))
+        // Allow larger payloads and slower mirrors; installs still stay parallelized
+        .timeout(Duration::from_secs(120))
         .user_agent("pacm/0.1.0 (+https://github.com/pacmpkg/pacm)")
         .build()
         .expect("http client")

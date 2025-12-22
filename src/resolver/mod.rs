@@ -24,41 +24,7 @@ impl Resolver {
         versions: &BTreeMap<Version, String>,
         range: &str,
     ) -> Result<(Version, String)> {
-        let norm = canonicalize_npm_range(range);
-        // Support npm-style OR sets using '||' by evaluating as union of sub-ranges
-        let is_or = range.contains("||") || norm.contains("||");
-        let reqs: Vec<VersionReq> = if is_or {
-            let parts: Vec<&str> =
-                range.split("||").map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
-            let mut v: Vec<VersionReq> = Vec::new();
-            for p in parts {
-                let pnorm = canonicalize_npm_range(p);
-                if pnorm == "*" {
-                    v.push(VersionReq::STAR);
-                } else {
-                    match VersionReq::from_str(&pnorm) {
-                        Ok(r) => v.push(r),
-                        Err(e) => {
-                            return Err(anyhow!(
-                                "invalid semver sub-range '{pnorm}' (orig '{p}'): {e}"
-                            ))
-                        }
-                    }
-                }
-            }
-            if v.is_empty() {
-                return Err(anyhow!("empty OR range '{range}'"));
-            }
-            v
-        } else {
-            let req = if norm == "*" {
-                VersionReq::STAR
-            } else {
-                VersionReq::from_str(&norm)
-                    .map_err(|e| anyhow!("invalid semver range '{norm}' (orig '{range}'): {e}"))?
-            };
-            vec![req]
-        };
+        let reqs = parse_range_to_reqs(range)?;
         let mut candidates: Vec<_> = versions.iter().collect();
         candidates.sort_by(|a, b| b.0.cmp(a.0)); // descending
         for (ver, tarball) in candidates {
@@ -92,17 +58,7 @@ pub fn canonicalize_npm_range(input: &str) -> String {
         return s.to_string();
     }
 
-    // Insert commas between separate comparator expressions when they are
-    // written with spaces (e.g. "^3.1.0 < 4" -> "^3.1.0, < 4"). The semver
-    // crate expects comparators to be separated by commas. This is a
-    // best-effort normalization and runs before more detailed tokenization.
-    let mut s = s.to_string();
-    // Process multi-char operators first to avoid partial matches
-    for op in &["<=", ">=", "<", ">", "=", "^", "~"] {
-        let pat = format!(" {op}");
-        let rep = format!(", {op}");
-        s = s.replace(&pat, &rep);
-    }
+    let s = s.to_string();
 
     // If it parses as a full semver (including prerelease/build), treat as exact
     if semver::Version::parse(&s).is_ok() {
@@ -184,11 +140,67 @@ pub fn canonicalize_npm_range(input: &str) -> String {
     s.to_string()
 }
 
+fn parse_range_to_reqs(range: &str) -> Result<Vec<VersionReq>> {
+    let norm = canonicalize_npm_range(range);
+    let is_or = range.contains("||") || norm.contains("||");
+    if is_or {
+        let parts: Vec<&str> = range.split("||").map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return Err(anyhow!("empty OR range '{range}'"));
+        }
+        let mut reqs = Vec::with_capacity(parts.len());
+        for p in parts {
+            let pnorm = canonicalize_npm_range(p);
+            if pnorm == "*" {
+                reqs.push(VersionReq::STAR);
+            } else {
+                match VersionReq::from_str(&pnorm) {
+                    Ok(r) => reqs.push(r),
+                    Err(e) => {
+                        // If the token looks like a dist-tag (no digits), skip it for semver
+                        // matching so mixed ranges like "^3 || insiders" still work.
+                        if !has_digit(&pnorm) {
+                            continue;
+                        }
+                        return Err(anyhow!(
+                            "invalid semver sub-range '{pnorm}' (orig '{p}'): {e}"
+                        ));
+                    }
+                }
+            }
+        }
+        if reqs.is_empty() {
+            // All parts were tags/invalid for semver; treat as STAR to avoid hard failure.
+            Ok(vec![VersionReq::STAR])
+        } else {
+            Ok(reqs)
+        }
+    } else {
+        if norm == "*" {
+            return Ok(vec![VersionReq::STAR]);
+        }
+        let req = VersionReq::from_str(&norm)
+            .map_err(|e| anyhow!("invalid semver range '{norm}' (orig '{range}'): {e}"))?;
+        Ok(vec![req])
+    }
+}
+
+pub fn version_satisfies(range: &str, version: &Version) -> Result<bool> {
+    let reqs = match parse_range_to_reqs(range) {
+        Ok(r) => r,
+        Err(_) => return Ok(false),
+    };
+    Ok(reqs.iter().any(|r| r.matches(version)))
+}
+
 fn is_op(t: &str) -> bool {
     matches!(t, ">" | "<" | ">=" | "<=" | "=" | "^" | "~")
 }
 fn is_numeric(t: &str) -> bool {
     !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+}
+fn has_digit(t: &str) -> bool {
+    t.chars().any(|c| c.is_ascii_digit())
 }
 fn count_dots(t: &str) -> usize {
     t.chars().filter(|&c| c == '.').count()
@@ -215,7 +227,7 @@ fn expand_wildcard(pattern: &str) -> String {
     }
     if parts.len() == 2 && (parts[1].eq_ignore_ascii_case("x") || parts[1] == "*") {
         if let Ok(maj) = parts[0].parse::<u64>() {
-            return format!(">={maj}.0.0, <{} .0.0", maj + 1).replace("  ", " ").replace(" .", ".");
+            return format!(">={maj}.0.0, <{}.0.0", maj + 1);
         }
     }
     if parts.len() == 3 && (parts[2].eq_ignore_ascii_case("x") || parts[2] == "*") {

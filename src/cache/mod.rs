@@ -133,11 +133,13 @@ pub struct CachedManifest {
     #[serde(default)]
     pub name: Option<String>,
     pub version: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "map_or_empty")]
     pub dependencies: std::collections::BTreeMap<String, String>,
-    #[serde(default, rename = "optionalDependencies")]
+    #[serde(default, rename = "devDependencies", deserialize_with = "map_or_empty")]
+    pub dev_dependencies: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "optionalDependencies", deserialize_with = "map_or_empty")]
     pub optional_dependencies: std::collections::BTreeMap<String, String>,
-    #[serde(default, rename = "peerDependencies")]
+    #[serde(default, rename = "peerDependencies", deserialize_with = "map_or_empty")]
     pub peer_dependencies: std::collections::BTreeMap<String, String>,
     #[serde(default, rename = "peerDependenciesMeta")]
     pub peer_dependencies_meta: std::collections::BTreeMap<String, PeerMeta>,
@@ -151,6 +153,24 @@ pub struct CachedManifest {
     pub cpu_arch: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+enum MapOrSeq {
+    Map(std::collections::BTreeMap<String, String>),
+    Seq(Vec<serde_json::Value>),
+    Null(Option<()>),
+}
+
+fn map_or_empty<'de, D>(deserializer: D) -> std::result::Result<std::collections::BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = MapOrSeq::deserialize(deserializer)?;
+    match v {
+        MapOrSeq::Map(m) => Ok(m),
+        MapOrSeq::Seq(_) | MapOrSeq::Null(_) => Ok(std::collections::BTreeMap::new()),
+    }
+}
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum BinField {

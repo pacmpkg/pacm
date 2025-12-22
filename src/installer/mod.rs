@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use serde_json;
 
 #[derive(Debug, Clone)]
 pub struct PackageInstance {
@@ -56,45 +59,140 @@ impl Installer {
         plan: &HashMap<String, InstallPlanEntry>,
         lock: &mut Lockfile,
     ) -> Result<Vec<InstallOutcome>> {
+        let empty = std::collections::HashSet::new();
+        self.install_with_progress(project_root, plan, lock, &empty, &empty, None)
+    }
+
+    pub fn install_with_progress(
+        &self,
+        project_root: &Path,
+        plan: &HashMap<String, InstallPlanEntry>,
+        lock: &mut Lockfile,
+        hoist_roots: &std::collections::HashSet<String>,
+        workspace_folder_paths: &std::collections::HashSet<String>,
+        on_progress: Option<Arc<dyn Fn(usize, usize, &str) + Send + Sync>>,
+    ) -> Result<Vec<InstallOutcome>> {
         let node_modules = project_root.join("node_modules");
-        fs::create_dir_all(&node_modules)?;
+        let pacm_root = node_modules.join(".pacm");
+        fs::create_dir_all(&pacm_root)?;
         let mut names: Vec<String> = plan.keys().cloned().collect();
         names.sort();
+        let total = names.len();
+        let counter = AtomicUsize::new(0);
 
         let install_results: Result<Vec<(String, InstallMode)>> = names
             .par_iter()
             .map(|name| -> Result<(String, InstallMode)> {
                 let entry =
                     plan.get(name).expect("plan entries should remain stable across iteration");
-                let mut dest = node_modules.clone();
+                let mut dest = pacm_root.clone();
                 for part in entry.package.name.split('/') {
                     dest.push(part);
                 }
                 let outcome_mode = self
-                    .materialize(&entry.store_entry, &dest)
+                    .materialize_fast(&entry.store_entry, &dest)
                     .with_context(|| format!("materialize {} into project", entry.package.name))?;
-
-                // NOTE: creating bin shims can race when performed concurrently for many
-                // packages writing into the same `node_modules/.bin` directory. Create the
-                // package files in parallel above, and then create shims serially below to
-                // avoid intermittent filesystem races on some platforms.
-
+                if let Some(cb) = &on_progress {
+                    let done = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    cb(done, total, name);
+                }
                 Ok((entry.package.name.clone(), outcome_mode))
             })
             .collect();
 
         let install_results = install_results?;
 
-        // Create `.bin` shims serially for each installed package to avoid concurrent
-        // writes into the same `.bin` directory which can be flaky on some filesystems.
-        for (package_name, _mode) in &install_results {
-            let mut dest = node_modules.clone();
-            for part in package_name.split('/') {
-                dest.push(part);
+        // Wire dependency links inside .pacm in parallel
+        // Create per-package node_modules directories and link deps to their .pacm targets.
+        install_results.par_iter().for_each(|(pkg_name, _)| {
+            if let Some(entry) = plan.get(pkg_name) {
+                let pkg_dir = pacm_root.join(pkg_name);
+                let deps_dir = pkg_dir.join("node_modules");
+                let _ = fs::create_dir_all(&deps_dir);
+                let mut dep_names: Vec<&String> = Vec::new();
+                dep_names.extend(entry.package.dependencies.keys());
+                dep_names.extend(entry.package.optional_dependencies.keys());
+                for dep in dep_names {
+                    if dep == pkg_name {
+                        continue;
+                    }
+                    let target = pacm_root.join(dep);
+                    if !target.exists() {
+                        continue;
+                    }
+                    let link_path = deps_dir.join(dep);
+                    let _ = std::fs::remove_dir_all(&link_path);
+                    let _ = std::fs::remove_file(&link_path);
+                    let _ = try_symlink_dir(&target, &link_path);
+                }
             }
-            create_bin_shims(project_root, package_name, &dest)
-                .with_context(|| format!("create bin shims for {package_name}"))?;
+        });
+
+        // Hoist only root/workspace deps to top-level node_modules for fast resolution.
+        for (pkg_name, _) in &install_results {
+            if !hoist_roots.contains(pkg_name) {
+                continue;
+            }
+            let src = pacm_root.join(pkg_name);
+            let dest = node_modules.join(pkg_name);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_dir_all(&dest);
+            let _ = std::fs::remove_file(&dest);
+            if try_symlink_dir(&src, &dest)? { /* ok */ } else { let _ = link_or_copy_tree(&src, &dest)?; }
         }
+
+        // Materialize workspace node_modules in parallel: for each workspace folder,
+        // only create node_modules if the workspace has dependencies,
+        // and only link what's actually declared in its package.json
+        workspace_folder_paths.par_iter().for_each(|ws_folder| {
+            let ws_pkg_path = project_root.join(ws_folder).join("package.json");
+            if !ws_pkg_path.exists() {
+                return;
+            }
+
+            if let Ok(mf_text) = fs::read_to_string(&ws_pkg_path) {
+                if let Ok(mf) = serde_json::from_str::<serde_json::Value>(&mf_text) {
+                    let mut dep_list = Vec::new();
+                    if let Some(deps) = mf.get("dependencies").and_then(|d| d.as_object()) {
+                        dep_list.extend(deps.keys().cloned());
+                    }
+                    if let Some(devdeps) = mf.get("devDependencies").and_then(|d| d.as_object()) {
+                        dep_list.extend(devdeps.keys().cloned());
+                    }
+
+                    // Only create node_modules if there are dependencies
+                    if !dep_list.is_empty() {
+                        let ws_nm = project_root.join(ws_folder).join("node_modules");
+                        let _ = fs::create_dir_all(&ws_nm);
+
+                        for dep_name in dep_list {
+                            let link_path = ws_nm.join(&dep_name);
+                            let _ = std::fs::remove_dir_all(&link_path);
+                            let _ = std::fs::remove_file(&link_path);
+
+                            // Link to root .pacm for both workspace and external deps
+                            // (root .pacm always has the package even if not hoisted)
+                            let target = pacm_root.join(&dep_name);
+                            if target.exists() {
+                                let rel_target = PathBuf::from("../../node_modules/.pacm").join(&dep_name);
+                                let _ = try_symlink_dir(&rel_target, &link_path);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Create `.bin` shims in parallel for hoisted packages.
+        install_results.par_iter().for_each(|(package_name, _mode)| {
+            if hoist_roots.contains(package_name) {
+                let pkg_dest_dir = pacm_root.join(package_name);
+                let _ = create_bin_shims(project_root, package_name, &pkg_dest_dir);
+            }
+        });
+
         let mut outcomes = Vec::with_capacity(install_results.len());
         for (package_name, outcome_mode) in install_results {
             if let Some(entry) = plan.get(&package_name) {
@@ -143,6 +241,37 @@ impl Installer {
                     Ok(InstallMode::Link)
                 } else {
                     Ok(InstallMode::Copy)
+                }
+            }
+        }
+    }
+
+    fn materialize_fast(&self, store_entry: &StoreEntry, dest: &Path) -> Result<InstallMode> {
+        if dest.exists() || std::fs::symlink_metadata(dest).is_ok() {
+            fs::remove_dir_all(dest).or_else(|_| {
+                if dest.is_file() {
+                    fs::remove_file(dest)
+                } else {
+                    Err(std::io::Error::other("failed to remove existing destination"))
+                }
+            })?;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        match self.mode {
+            InstallMode::Copy => {
+                copy_tree_only(store_entry.package_dir(), dest)?;
+                Ok(InstallMode::Copy)
+            }
+            InstallMode::Link => {
+                // Try to symlink the entire directory for speed; fallback to file-level hard links
+                if try_symlink_dir(store_entry.package_dir(), dest)? {
+                    Ok(InstallMode::Link)
+                } else {
+                    let linked = link_or_copy_tree(store_entry.package_dir(), dest)?;
+                    if linked { Ok(InstallMode::Link) } else { Ok(InstallMode::Copy) }
                 }
             }
         }
@@ -206,6 +335,29 @@ fn link_or_copy_tree(from: &Path, to: &Path) -> Result<bool> {
     Ok(all_linked)
 }
 
+fn try_symlink_dir(from: &Path, to: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        match symlink(from, to) {
+            Ok(_) => return Ok(true),
+            Err(_) => return Ok(false),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::symlink_dir;
+        match symlink_dir(from, to) {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                // Privilege not held: fall back
+                if let Some(code) = e.raw_os_error() { if code == 1314 { return Ok(false); } }
+                Ok(false)
+            }
+        }
+    }
+}
+
 fn create_bin_shims(project_root: &Path, package_name: &str, pkg_dest_dir: &Path) -> Result<()> {
     // Read cached manifest to get bin entries
     // Determine version by reading the installed package.json to avoid relying on the caller
@@ -256,6 +408,8 @@ fn create_bin_shims(project_root: &Path, package_name: &str, pkg_dest_dir: &Path
         }
         // Build relative JS path from .bin directory: ../<pkg>/<rel_path>
         let mut rel_from_bin = PathBuf::from("..");
+        // Account for .pacm layout: ../.pacm/<pkg>/...
+        rel_from_bin = rel_from_bin.join(".pacm");
         for part in package_name.split('/') {
             rel_from_bin = rel_from_bin.join(part);
         }

@@ -21,7 +21,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tar::Archive;
 
 use rayon::prelude::*;
@@ -76,6 +77,87 @@ fn write_lock_entry(
     entry.content_hash = None;
     entry.link_mode = None;
     entry.store_path = None;
+}
+
+fn entry_to_instance(name: &str, entry: &PackageEntry) -> PackageInstance {
+    PackageInstance {
+        name: name.to_string(),
+        version: entry.version.clone().unwrap_or_default(),
+        dependencies: entry.dependencies.clone(),
+        optional_dependencies: entry.optional_dependencies.clone(),
+        peer_dependencies: entry.peer_dependencies.clone(),
+        dev_dependencies: entry.dev_dependencies.clone(),
+        source: None,
+    }
+}
+
+fn pick_cached_satisfying_manifest(
+    resolver: &crate::resolver::Resolver,
+    name: &str,
+    range: &str,
+) -> Option<(semver::Version, CachedManifest)> {
+    // Only attempt semver selection for registry specs; git/tarball/url ranges should be handled
+    // by the main resolution path.
+    if !matches!(crate::resolver::spec::PackageSpec::parse(range), crate::resolver::spec::PackageSpec::Registry { .. }) {
+        return None;
+    }
+    let cached_versions = crate::cache::cached_versions(name);
+    if cached_versions.is_empty() {
+        return None;
+    }
+    let mut map: BTreeMap<semver::Version, String> = BTreeMap::new();
+    for v in cached_versions {
+        map.insert(v, String::new());
+    }
+    let picked = resolver.pick_version(&map, range).ok()?;
+    let ver_str = picked.0.to_string();
+    if !crate::cache::cache_package_path(name, &ver_str).exists() {
+        return None;
+    }
+    let manifest = crate::cache::read_cached_manifest(name, &ver_str).ok()?;
+    Some((picked.0, manifest))
+}
+
+fn retry_download_into_cache(
+    fetcher: &Fetcher,
+    pd: &PendingDownload,
+    progress: &Arc<Mutex<ProgressRenderer>>,
+    counter: &AtomicUsize,
+    total: usize,
+    no_progress: bool,
+) -> Result<String> {
+    let mut last_err: Option<anyhow::Error> = None;
+    let max_attempts = 3;
+    for attempt in 1..=max_attempts {
+        match download_into_cache(
+            fetcher,
+            &pd.name,
+            &pd.version,
+            &pd.url,
+            pd.integrity_hint.as_deref(),
+            pd.scripts.as_ref(),
+        ) {
+            Ok(integrity) => {
+                if !no_progress {
+                    let done = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut pr = progress.lock().unwrap();
+                    pr.render(format_status(
+                        "downloading",
+                        &format!("{done}/{total} {name}@{ver}", name = pd.name, ver = pd.version),
+                    ));
+                }
+                return Ok(integrity);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < max_attempts {
+                    std::thread::sleep(Duration::from_millis(200 * attempt as u64));
+                    continue;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 #[derive(Clone)]
@@ -136,7 +218,11 @@ fn resolve_github_tarball(spec: &crate::resolver::spec::GithubSpec) -> Result<Gi
                 return Ok(GithubResolved { tarball_url, commit: commit.sha });
             }
         }
-        anyhow::bail!("failed to resolve GitHub ref {reference} for {}/{}", spec.owner, spec.repo);
+        // Try direct tarball for the provided ref even if commit lookup failed (e.g., repo uses
+        // non-main/master default branch or branch protection blocks commit API).
+        let tarball_url =
+            format!("https://codeload.github.com/{}/{}/tar.gz/{}", spec.owner, spec.repo, reference);
+        return Ok(GithubResolved { tarball_url, commit: reference });
     }
 
     let commit: CommitInfo = resp.json()?;
@@ -304,6 +390,41 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     let added_root: Vec<String> = new_names.difference(&old_names).cloned().collect();
     let removed_root: Vec<String> = old_names.difference(&new_names).cloned().collect();
 
+    // Determine which workspace packages are actually referenced from any manifest
+    let workspace_pkg_names: std::collections::HashSet<String> = workspace_map.keys().cloned().collect();
+    let mut referenced_workspace_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut collect_refs = |mf: &manifest::Manifest| {
+        for dep in mf
+            .dependencies
+            .keys()
+            .chain(mf.dev_dependencies.keys())
+            .chain(mf.optional_dependencies.keys())
+            .chain(mf.peer_dependencies.keys())
+        {
+            if workspace_pkg_names.contains(dep) {
+                referenced_workspace_names.insert(dep.clone());
+            }
+        }
+    };
+
+    // Root manifest refs
+    collect_refs(&manifest);
+    // Workspace manifest refs
+    for ws in workspace_map.values() {
+        collect_refs(&ws.manifest);
+    }
+
+    let mut hoist_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
+    hoist_roots.extend(new_root_deps.keys().cloned());
+    hoist_roots.extend(referenced_workspace_names.iter().cloned());
+
+    // Create a separate map for workspace folder paths to use in installer
+    let mut workspace_folder_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ws in workspace_map.values() {
+        workspace_folder_paths.insert(ws.relative_path.clone());
+    }
+
     if lock == original_lock
         && added_root.is_empty()
         && removed_root.is_empty()
@@ -336,7 +457,16 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                     ));
                 }
                 let installer = Installer::new(install_mode);
-                let outcomes = installer.install(&project_root, &plan, &mut lock)?;
+                let cb = if no_progress {
+                    None
+                } else {
+                    let prog = Arc::clone(&progress);
+                    Some(Arc::new(move |done: usize, total: usize, pkg: &str| {
+                        let mut pr = prog.lock().unwrap();
+                        pr.render(format_status("linking", &format!("{}/{} {}", done, total, pkg)));
+                    }) as Arc<dyn Fn(usize, usize, &str) + Send + Sync>)
+                };
+                let outcomes = installer.install_with_progress(&project_root, &plan, &mut lock, &hoist_roots, &workspace_folder_paths, cb)?;
                 {
                     let mut pr = progress.lock().unwrap();
                     pr.finish();
@@ -437,17 +567,11 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     let mut installed_count = 0usize;
     let progress = Arc::new(Mutex::new(ProgressRenderer::new()));
     let mut pending_downloads: Vec<PendingDownload> = Vec::new();
+    let mut pending_set: HashSet<(String, String)> = HashSet::new();
 
     let mut instances: BTreeMap<String, PackageInstance> = BTreeMap::new();
 
     while let Some(Task { name, range, optional_root }) = queue.pop_front() {
-        if visited_name_version.iter().any(|(n, _)| n == &name) {
-            continue;
-        }
-        if !no_progress {
-            let mut pr = progress.lock().unwrap();
-            pr.render(format_status("resolving", &format!("{name}@{range}")));
-        }
 
         if let Some(ws) = workspace_map.get(&name) {
             let ws_version = ws.manifest.version.clone();
@@ -532,6 +656,186 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
             }
             continue;
+        }
+
+        // Fast path: reuse an existing lock entry if it still satisfies the requested range and the
+        // package is already cached (or has a resolved URL we can download without re-resolving).
+        if matches!(PackageSpec::parse(&range), PackageSpec::Registry { .. }) {
+            let lock_key = format!("node_modules/{name}");
+            if let Some(lock_entry) = lock.packages.get(&lock_key) {
+                if let Some(ver_str) = &lock_entry.version {
+                    if let Ok(ver) = semver::Version::parse(ver_str) {
+                        let matches_range = match crate::resolver::version_satisfies(&range, &ver) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                if optional_root {
+                                    false
+                                } else {
+                                    return Err(e);
+                                }
+                            }
+                        };
+                        if matches_range {
+                            let platform_ok =
+                                platform_supported(&lock_entry.os, &lock_entry.cpu_arch);
+                            if !platform_ok {
+                                if optional_root {
+                                    visited_name_version.insert((name.clone(), ver_str.clone()));
+                                    continue;
+                                } else {
+                                    bail!("{name}@{ver_str} is not supported on this platform");
+                                }
+                            }
+
+                            let cache_exists =
+                                crate::cache::cache_package_path(&name, ver_str).exists();
+                            let mut queued_download = false;
+                            if !cache_exists {
+                                if prefer_offline {
+                                    if optional_root {
+                                        visited_name_version.insert((name.clone(), ver_str.clone()));
+                                        continue;
+                                    }
+                                    bail!("{name}@{ver_str} not in cache and --prefer-offline is set");
+                                }
+                                if let Some(url) = &lock_entry.resolved {
+                                    if !no_progress {
+                                        let mut pr = progress.lock().unwrap();
+                                        pr.render(format_status(
+                                            "queued",
+                                            &format!("download {name}@{ver_str} (lock)"),
+                                        ));
+                                    }
+                                    let key = (name.clone(), ver_str.clone());
+                                    if pending_set.insert(key) {
+                                        pending_downloads.push(PendingDownload {
+                                            name: name.clone(),
+                                            version: ver_str.clone(),
+                                            url: url.clone(),
+                                            integrity_hint: lock_entry.integrity.clone(),
+                                            scripts: None,
+                                        });
+                                        queued_download = true;
+                                    } else {
+                                        queued_download = true;
+                                    }
+                                }
+                            }
+
+                            if cache_exists || queued_download {
+                                if !no_progress {
+                                    let mut pr = progress.lock().unwrap();
+                                    pr.render(format_status("fast", &format!("reuse {name}@{ver_str}")));
+                                }
+                                instances.insert(name.clone(), entry_to_instance(&name, lock_entry));
+                                visited_name_version.insert((name.clone(), ver_str.clone()));
+
+                                let mut to_enqueue: Vec<(String, String, bool)> = Vec::new();
+                                for (dn, dr) in lock_entry.dependencies.iter() {
+                                    to_enqueue.push((dn.clone(), dr.clone(), optional_root));
+                                }
+                                for (dn, dr) in lock_entry.optional_dependencies.iter() {
+                                    to_enqueue.push((dn.clone(), dr.clone(), true));
+                                }
+                                for (dn, dr) in lock_entry.peer_dependencies.iter() {
+                                    let is_optional = lock_entry
+                                        .peer_dependencies_meta
+                                        .get(dn)
+                                        .map(|m| m.optional)
+                                        .unwrap_or(false);
+                                    if !is_optional {
+                                        to_enqueue.push((dn.clone(), dr.clone(), false));
+                                    }
+                                }
+                                for (dn, dr, optflag) in to_enqueue {
+                                    queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cached store fast path: if a cached package satisfies the range, reuse it without
+        // touching the network. Helps for optional deps and repeated installs.
+        if let Some((picked_ver, cached_mf)) =
+            pick_cached_satisfying_manifest(&resolver, &name, &range)
+        {
+            let picked_version = picked_ver.to_string();
+            if visited_name_version.contains(&(name.clone(), picked_version.clone())) {
+                continue;
+            }
+            let package_os = cached_mf.os.clone();
+            let package_cpu = cached_mf.cpu_arch.clone();
+            let platform_ok = platform_supported(&package_os, &package_cpu);
+            if !platform_ok {
+                if optional_root {
+                    visited_name_version.insert((name.clone(), picked_version.clone()));
+                    continue;
+                } else {
+                    bail!("{name}@{picked_version} is not supported on this platform");
+                }
+            }
+
+            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> = cached_mf
+                .peer_dependencies_meta
+                .iter()
+                .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
+                .collect();
+
+            write_lock_entry(
+                &mut lock,
+                &name,
+                &picked_version,
+                None,
+                None,
+                &cached_mf.dependencies,
+                &cached_mf.dev_dependencies,
+                &cached_mf.optional_dependencies,
+                &cached_mf.peer_dependencies,
+                &peer_meta_map,
+                &package_os,
+                &package_cpu,
+            );
+
+            instances.insert(
+                name.clone(),
+                PackageInstance {
+                    name: name.clone(),
+                    version: picked_version.clone(),
+                    dependencies: cached_mf.dependencies.clone(),
+                    optional_dependencies: cached_mf.optional_dependencies.clone(),
+                    peer_dependencies: cached_mf.peer_dependencies.clone(),
+                    dev_dependencies: cached_mf.dev_dependencies.clone(),
+                    source: None,
+                },
+            );
+            visited_name_version.insert((name.clone(), picked_version.clone()));
+
+            let mut to_enqueue: Vec<(String, String, bool)> = Vec::new();
+            for (dn, dr) in cached_mf.dependencies.into_iter() {
+                to_enqueue.push((dn, dr, optional_root));
+            }
+            for (dn, dr) in cached_mf.optional_dependencies.into_iter() {
+                to_enqueue.push((dn, dr, true));
+            }
+            for (dn, dr) in cached_mf.peer_dependencies.into_iter() {
+                let is_optional_peer = peer_meta_map.get(&dn).map(|m| m.optional).unwrap_or(false);
+                if !is_optional_peer {
+                    to_enqueue.push((dn, dr, false));
+                }
+            }
+            for (dn, dr, optflag) in to_enqueue {
+                queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+            }
+            continue;
+        }
+
+        if !no_progress {
+            let mut pr = progress.lock().unwrap();
+            pr.render(format_status("resolving", &format!("{name}@{range}")));
         }
 
         let spec_kind = PackageSpec::parse(&range);
@@ -1126,13 +1430,16 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                         &format!("download {name}@{picked_version}"),
                     ));
                 }
-                pending_downloads.push(PendingDownload {
-                    name: name.clone(),
-                    version: picked_version.clone(),
-                    url,
-                    integrity_hint: integrity_owned.clone(),
-                    scripts: scripts_map.clone(),
-                });
+                let key = (name.clone(), picked_version.clone());
+                if pending_set.insert(key) {
+                    pending_downloads.push(PendingDownload {
+                        name: name.clone(),
+                        version: picked_version.clone(),
+                        url,
+                        integrity_hint: integrity_owned.clone(),
+                        scripts: scripts_map.clone(),
+                    });
+                }
                 integrity_for_entry_string = integrity_owned.clone();
             }
         }
@@ -1195,17 +1502,20 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                 &format!("{} packages in parallel", pending_downloads.len()),
             ));
         }
+        let total_downloads = pending_downloads.len();
+        let counter = AtomicUsize::new(0);
+        let progress_clone = progress.clone();
 
         let download_results: Result<Vec<(String, String)>> = pending_downloads
             .par_iter()
             .map(|pd| -> Result<(String, String)> {
-                let integrity = download_into_cache(
+                let integrity = retry_download_into_cache(
                     &fetcher,
-                    &pd.name,
-                    &pd.version,
-                    &pd.url,
-                    pd.integrity_hint.as_deref(),
-                    pd.scripts.as_ref(),
+                    pd,
+                    &progress_clone,
+                    &counter,
+                    total_downloads,
+                    no_progress,
                 )?;
                 Ok((pd.name.clone(), integrity))
             })
@@ -1260,9 +1570,40 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
         }
     }
 
+    // Safety: ensure every instance has a corresponding lockfile entry before store planning.
+    // This covers cases where fast paths skipped writing but instances were recorded.
+    for (name, inst) in &instances {
+        let key = format!("node_modules/{name}");
+        if !lock.packages.contains_key(&key) {
+            write_lock_entry(
+                &mut lock,
+                name,
+                &inst.version,
+                None,
+                None,
+                &inst.dependencies,
+                &inst.dev_dependencies,
+                &inst.optional_dependencies,
+                &inst.peer_dependencies,
+                &BTreeMap::new(),
+                &[],
+                &[],
+            );
+        }
+    }
+
     let plan = ensure_store_plan(&store, &mut lock, &instances)?;
     let installer = Installer::new(install_mode);
-    let outcomes = installer.install(&project_root, &plan, &mut lock)?;
+    let cb = if no_progress {
+        None
+    } else {
+        let prog = Arc::clone(&progress);
+        Some(Arc::new(move |done: usize, total: usize, pkg: &str| {
+            let mut pr = prog.lock().unwrap();
+            pr.render(format_status("linking", &format!("{}/{} {}", done, total, pkg)));
+        }) as Arc<dyn Fn(usize, usize, &str) + Send + Sync>)
+    };
+    let outcomes = installer.install_with_progress(&project_root, &plan, &mut lock, &hoist_roots, &workspace_folder_paths, cb)?;
     lockfile::write(&lock, lock_path.clone())?;
     if lockfile_has_no_packages(&lock) {
         let _ = std::fs::remove_file(&lock_path);
@@ -1272,7 +1613,6 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
 
     if !no_progress {
         let mut pr = progress.lock().unwrap();
-        pr.render(format_status("linking", "graph"));
         pr.finish();
     }
 
@@ -1321,23 +1661,25 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     println!(
         "{C_GRAY}[pacm]{C_RESET} {C_GREEN}installed{C_RESET} {total} packages ({C_GREEN}{installed_count} downloaded{C_RESET}, {C_DIM}{reused} reused{C_RESET}) in {dur:.2?}"
     );
-    // Detect packages that declare lifecycle scripts (preinstall/install/postinstall)
-    let mut pkgs_with_scripts: Vec<String> = Vec::new();
-    for (name, plan_entry) in &plan {
-        // read store metadata JSON to inspect scripts
-        if let Ok(txt) = std::fs::read_to_string(&plan_entry.store_entry.metadata_path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
-                if let Some(scripts) = val.get("scripts") {
-                    if scripts.get("preinstall").is_some()
-                        || scripts.get("install").is_some()
-                        || scripts.get("postinstall").is_some()
-                    {
-                        pkgs_with_scripts.push(name.clone());
+    // Detect packages that declare lifecycle scripts (preinstall/install/postinstall) in parallel
+    let pkgs_with_scripts: Vec<String> = plan
+        .par_iter()
+        .filter_map(|(name, plan_entry)| {
+            if let Ok(txt) = std::fs::read_to_string(&plan_entry.store_entry.metadata_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                    if let Some(scripts) = val.get("scripts") {
+                        if scripts.get("preinstall").is_some()
+                            || scripts.get("install").is_some()
+                            || scripts.get("postinstall").is_some()
+                        {
+                            return Some(name.clone());
+                        }
                     }
                 }
             }
-        }
-    }
+            None
+        })
+        .collect();
 
     // root project scripts from local package.json
     let mut root_has_scripts = false;
@@ -1467,6 +1809,10 @@ fn ensure_store_for_package(
 
     let mut dep_fps: Vec<DependencyFingerprint> = Vec::with_capacity(dep_names.len());
     for dep in dep_names {
+        if dep == name {
+            // Skip self-dependencies to avoid artificial cycles from malformed manifests
+            continue;
+        }
         let dep_key = format!("node_modules/{dep}");
         let Some(dep_entry) = lock.packages.get(&dep_key) else {
             continue;
@@ -1480,6 +1826,15 @@ fn ensure_store_for_package(
             && !platform_supported(&dep_entry.os, &dep_entry.cpu_arch)
         {
             // skip optional dependency incompatible with platform
+            continue;
+        }
+        // Avoid cycles by not recursing into deps already on the stack
+        if visiting.contains(&dep) {
+            dep_fps.push(DependencyFingerprint {
+                name: dep.clone(),
+                version: dep_version.clone(),
+                store_key: None,
+            });
             continue;
         }
         let dep_store_entry =
