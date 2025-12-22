@@ -32,10 +32,7 @@ pub fn discover_workspaces(root: &Path, manifest: &Manifest) -> Result<Vec<Works
         for entry in
             glob(&pat_str).with_context(|| format!("expand workspace pattern {pat_str}"))?
         {
-            let path = match entry {
-                Ok(p) => p,
-                Err(e) => return Err(e.into()),
-            };
+            let path = entry?;
             let pkg_dir = if path.is_file() {
                 if path.file_name().map(|n| n == "package.json").unwrap_or(false) {
                     path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone())
