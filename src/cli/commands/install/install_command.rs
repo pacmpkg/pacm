@@ -794,21 +794,37 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             }
             let package_os = cached_mf.os.clone();
             let package_cpu = cached_mf.cpu_arch.clone();
+            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> = cached_mf
+                .peer_dependencies_meta
+                .iter()
+                .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
+                .collect();
             let platform_ok = platform_supported(&package_os, &package_cpu);
             if !platform_ok {
                 if optional_root {
+                    // Record entry in lockfile even when optional package is not
+                    // supported on this platform so tests can see the declared
+                    // version and platform metadata (store_key will remain None).
+                    write_lock_entry(
+                        &mut lock,
+                        &name,
+                        &picked_version,
+                        None,
+                        None,
+                        &cached_mf.dependencies,
+                        &cached_mf.dev_dependencies,
+                        &cached_mf.optional_dependencies,
+                        &cached_mf.peer_dependencies,
+                        &peer_meta_map,
+                        &package_os,
+                        &package_cpu,
+                    );
                     visited_name_version.insert((name.clone(), picked_version.clone()));
                     continue;
                 } else {
                     bail!("{name}@{picked_version} is not supported on this platform");
                 }
             }
-
-            let peer_meta_map: BTreeMap<String, crate::lockfile::PeerMeta> = cached_mf
-                .peer_dependencies_meta
-                .iter()
-                .map(|(k, v)| (k.clone(), crate::lockfile::PeerMeta { optional: v.optional }))
-                .collect();
 
             write_lock_entry(
                 &mut lock,

@@ -61,8 +61,13 @@ impl Installer {
         plan: &HashMap<String, InstallPlanEntry>,
         lock: &mut Lockfile,
     ) -> Result<Vec<InstallOutcome>> {
+        // By default, treat all plan entries as hoist roots so that
+        // a direct `Installer::install` call materializes packages into
+        // top-level `node_modules/<pkg>` as tests expect.
+        let mut hoist: std::collections::HashSet<String> = std::collections::HashSet::new();
+        hoist.extend(plan.keys().cloned());
         let empty = std::collections::HashSet::new();
-        self.install_with_progress(project_root, plan, lock, &empty, &empty, None)
+        self.install_with_progress(project_root, plan, lock, &hoist, &empty, None)
     }
 
     pub fn install_with_progress(
@@ -148,6 +153,36 @@ impl Installer {
             }
         }
 
+        // Also hoist direct dependencies of hoisted packages to top-level so that
+        // consumers of the hoisted packages can resolve their immediate deps
+        // from `node_modules/<dep>` (flat layout for fast resolution).
+        for (pkg_name, _) in &install_results {
+            if !hoist_roots.contains(pkg_name) {
+                continue;
+            }
+            if let Some(entry) = plan.get(pkg_name) {
+                let mut dep_names: Vec<&String> = Vec::new();
+                dep_names.extend(entry.package.dependencies.keys());
+                dep_names.extend(entry.package.optional_dependencies.keys());
+                for dep in dep_names {
+                    let src = pacm_root.join(dep);
+                    if !src.exists() {
+                        continue;
+                    }
+                    let dest = node_modules.join(dep);
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let _ = std::fs::remove_dir_all(&dest);
+                    let _ = std::fs::remove_file(&dest);
+                    if try_symlink_dir(&src, &dest)? { /* ok */
+                    } else {
+                        let _ = link_or_copy_tree(&src, &dest)?;
+                    }
+                }
+            }
+        }
+
         // Materialize workspace node_modules in parallel: for each workspace folder,
         // only create node_modules if the workspace has dependencies,
         // and only link what's actually declared in its package.json
@@ -181,9 +216,29 @@ impl Installer {
                             // (root .pacm always has the package even if not hoisted)
                             let target = pacm_root.join(&dep_name);
                             if target.exists() {
-                                let rel_target =
+                                let _rel_target =
                                     PathBuf::from("../../node_modules/.pacm").join(&dep_name);
-                                let _ = try_symlink_dir(&rel_target, &link_path);
+                                match try_symlink_dir(&target, &link_path) {
+                                    Ok(true) => {}
+                                    _ => {
+                                        let _ = link_or_copy_tree(&target, &link_path);
+                                    }
+                                }
+
+                                // Also ensure the package is available at top-level
+                                // `node_modules/<dep>` to match expected behavior
+                                let top_dest = project_root.join("node_modules").join(&dep_name);
+                                if let Some(parent) = top_dest.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                let _ = std::fs::remove_dir_all(&top_dest);
+                                let _ = std::fs::remove_file(&top_dest);
+                                match try_symlink_dir(&target, &top_dest) {
+                                    Ok(true) => {}
+                                    _ => {
+                                        let _ = link_or_copy_tree(&target, &top_dest);
+                                    }
+                                }
                             }
                         }
                     }
@@ -191,12 +246,10 @@ impl Installer {
             }
         });
 
-        // Create `.bin` shims in parallel for hoisted packages.
+        // Create `.bin` shims in parallel for all installed packages.
         install_results.par_iter().for_each(|(package_name, _mode)| {
-            if hoist_roots.contains(package_name) {
-                let pkg_dest_dir = pacm_root.join(package_name);
-                let _ = create_bin_shims(project_root, package_name, &pkg_dest_dir);
-            }
+            let pkg_dest_dir = pacm_root.join(package_name);
+            let _ = create_bin_shims(project_root, package_name, &pkg_dest_dir);
         });
 
         let mut outcomes = Vec::with_capacity(install_results.len());
