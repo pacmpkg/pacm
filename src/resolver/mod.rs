@@ -86,13 +86,53 @@ pub fn canonicalize_npm_range(input: &str) -> String {
         while i < tokens.len() {
             let t = tokens[i];
             let next = tokens.get(i + 1).copied();
+            // If token is an operator by itself ("<", ">=", etc.) then combine with next token
             if is_op(t) {
                 if let Some(ver) = next {
-                    comps.push(format!("{t}{ver}"));
+                    // If the version looks like a dotted semver (has a dot), prefer no
+                    // space (e.g., ">=2.1.2"). If it's a single numeric token like
+                    // "4" keep the space ("< 4") to match npm-style formatting used
+                    // in tests.
+                    if ver.contains('.') {
+                        comps.push(format!("{t}{ver}"));
+                    } else {
+                        comps.push(format!("{t} {ver}"));
+                    }
                     i += 2;
                     continue;
                 }
-                // dangling operator – fall back to original string
+                return s.to_string();
+            }
+            // Handle tokens that start with an operator + version (e.g. "^3.1.0", "<4").
+            fn split_prefix_op(tok: &str) -> Option<(&str, &str)> {
+                if tok.len() >= 2 && (tok.starts_with("<=") || tok.starts_with(">=")) {
+                    return Some((&tok[..2], &tok[2..]));
+                }
+                let first = &tok[..1];
+                if matches!(first, "<" | ">" | "=" | "^" | "~") {
+                    return Some((first, &tok[1..]));
+                }
+                None
+            }
+            if let Some((op, rest)) = split_prefix_op(t) {
+                if !rest.is_empty() {
+                    if rest.contains('.') || op == "^" || op == "~" {
+                        comps.push(format!("{}{}", op, rest));
+                    } else {
+                        comps.push(format!("{} {}", op, rest));
+                    }
+                    i += 1;
+                    continue;
+                }
+                if let Some(ver) = next {
+                    if ver.contains('.') || op == "^" || op == "~" {
+                        comps.push(format!("{}{}", op, ver));
+                    } else {
+                        comps.push(format!("{} {}", op, ver));
+                    }
+                    i += 2;
+                    continue;
+                }
                 return s.to_string();
             }
             // Possibly version separated from next comparator – treat as exact or wildcard pattern
