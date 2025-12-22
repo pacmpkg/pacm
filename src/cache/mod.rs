@@ -161,7 +161,9 @@ enum MapOrSeq {
     Null(Option<()>),
 }
 
-fn map_or_empty<'de, D>(deserializer: D) -> std::result::Result<std::collections::BTreeMap<String, String>, D::Error>
+fn map_or_empty<'de, D>(
+    deserializer: D,
+) -> std::result::Result<std::collections::BTreeMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

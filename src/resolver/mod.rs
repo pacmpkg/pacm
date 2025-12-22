@@ -144,7 +144,8 @@ fn parse_range_to_reqs(range: &str) -> Result<Vec<VersionReq>> {
     let norm = canonicalize_npm_range(range);
     let is_or = range.contains("||") || norm.contains("||");
     if is_or {
-        let parts: Vec<&str> = range.split("||").map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        let parts: Vec<&str> =
+            range.split("||").map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
         if parts.is_empty() {
             return Err(anyhow!("empty OR range '{range}'"));
         }

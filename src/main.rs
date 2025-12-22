@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
-use pacm::colors::*;
 use pacm::cli::PacmCli;
+use pacm::colors::*;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
     if let Err(e) = real_main() {
-        eprintln!("{gray}[pacm]{reset} {red}error{reset}: {e:#}", 
+        eprintln!(
+            "{gray}[pacm]{reset} {red}error{reset}: {e:#}",
             gray = C_GRAY,
             reset = C_RESET,
             red = C_RED,

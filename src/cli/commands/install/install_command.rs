@@ -20,8 +20,8 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::Read;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tar::Archive;
 
@@ -98,7 +98,10 @@ fn pick_cached_satisfying_manifest(
 ) -> Option<(semver::Version, CachedManifest)> {
     // Only attempt semver selection for registry specs; git/tarball/url ranges should be handled
     // by the main resolution path.
-    if !matches!(crate::resolver::spec::PackageSpec::parse(range), crate::resolver::spec::PackageSpec::Registry { .. }) {
+    if !matches!(
+        crate::resolver::spec::PackageSpec::parse(range),
+        crate::resolver::spec::PackageSpec::Registry { .. }
+    ) {
         return None;
     }
     let cached_versions = crate::cache::cached_versions(name);
@@ -220,8 +223,10 @@ fn resolve_github_tarball(spec: &crate::resolver::spec::GithubSpec) -> Result<Gi
         }
         // Try direct tarball for the provided ref even if commit lookup failed (e.g., repo uses
         // non-main/master default branch or branch protection blocks commit API).
-        let tarball_url =
-            format!("https://codeload.github.com/{}/{}/tar.gz/{}", spec.owner, spec.repo, reference);
+        let tarball_url = format!(
+            "https://codeload.github.com/{}/{}/tar.gz/{}",
+            spec.owner, spec.repo, reference
+        );
         return Ok(GithubResolved { tarball_url, commit: reference });
     }
 
@@ -391,8 +396,10 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     let removed_root: Vec<String> = old_names.difference(&new_names).cloned().collect();
 
     // Determine which workspace packages are actually referenced from any manifest
-    let workspace_pkg_names: std::collections::HashSet<String> = workspace_map.keys().cloned().collect();
-    let mut referenced_workspace_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let workspace_pkg_names: std::collections::HashSet<String> =
+        workspace_map.keys().cloned().collect();
+    let mut referenced_workspace_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     let mut collect_refs = |mf: &manifest::Manifest| {
         for dep in mf
@@ -420,7 +427,8 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     hoist_roots.extend(referenced_workspace_names.iter().cloned());
 
     // Create a separate map for workspace folder paths to use in installer
-    let mut workspace_folder_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut workspace_folder_paths: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for ws in workspace_map.values() {
         workspace_folder_paths.insert(ws.relative_path.clone());
     }
@@ -466,7 +474,14 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                         pr.render(format_status("linking", &format!("{}/{} {}", done, total, pkg)));
                     }) as Arc<dyn Fn(usize, usize, &str) + Send + Sync>)
                 };
-                let outcomes = installer.install_with_progress(&project_root, &plan, &mut lock, &hoist_roots, &workspace_folder_paths, cb)?;
+                let outcomes = installer.install_with_progress(
+                    &project_root,
+                    &plan,
+                    &mut lock,
+                    &hoist_roots,
+                    &workspace_folder_paths,
+                    cb,
+                )?;
                 {
                     let mut pr = progress.lock().unwrap();
                     pr.finish();
@@ -572,7 +587,6 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
     let mut instances: BTreeMap<String, PackageInstance> = BTreeMap::new();
 
     while let Some(Task { name, range, optional_root }) = queue.pop_front() {
-
         if let Some(ws) = workspace_map.get(&name) {
             let ws_version = ws.manifest.version.clone();
             if !workspace_dep_satisfies(&range, &ws_version) {
@@ -693,10 +707,13 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                             if !cache_exists {
                                 if prefer_offline {
                                     if optional_root {
-                                        visited_name_version.insert((name.clone(), ver_str.clone()));
+                                        visited_name_version
+                                            .insert((name.clone(), ver_str.clone()));
                                         continue;
                                     }
-                                    bail!("{name}@{ver_str} not in cache and --prefer-offline is set");
+                                    bail!(
+                                        "{name}@{ver_str} not in cache and --prefer-offline is set"
+                                    );
                                 }
                                 if let Some(url) = &lock_entry.resolved {
                                     if !no_progress {
@@ -725,9 +742,13 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                             if cache_exists || queued_download {
                                 if !no_progress {
                                     let mut pr = progress.lock().unwrap();
-                                    pr.render(format_status("fast", &format!("reuse {name}@{ver_str}")));
+                                    pr.render(format_status(
+                                        "fast",
+                                        &format!("reuse {name}@{ver_str}"),
+                                    ));
                                 }
-                                instances.insert(name.clone(), entry_to_instance(&name, lock_entry));
+                                instances
+                                    .insert(name.clone(), entry_to_instance(&name, lock_entry));
                                 visited_name_version.insert((name.clone(), ver_str.clone()));
 
                                 let mut to_enqueue: Vec<(String, String, bool)> = Vec::new();
@@ -748,7 +769,11 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
                                     }
                                 }
                                 for (dn, dr, optflag) in to_enqueue {
-                                    queue.push_back(Task { name: dn, range: dr, optional_root: optflag });
+                                    queue.push_back(Task {
+                                        name: dn,
+                                        range: dr,
+                                        optional_root: optflag,
+                                    });
                                 }
                                 continue;
                             }
@@ -1603,7 +1628,14 @@ pub(crate) fn cmd_install(specs: Vec<String>, options: InstallOptions) -> Result
             pr.render(format_status("linking", &format!("{}/{} {}", done, total, pkg)));
         }) as Arc<dyn Fn(usize, usize, &str) + Send + Sync>)
     };
-    let outcomes = installer.install_with_progress(&project_root, &plan, &mut lock, &hoist_roots, &workspace_folder_paths, cb)?;
+    let outcomes = installer.install_with_progress(
+        &project_root,
+        &plan,
+        &mut lock,
+        &hoist_roots,
+        &workspace_folder_paths,
+        cb,
+    )?;
     lockfile::write(&lock, lock_path.clone())?;
     if lockfile_has_no_packages(&lock) {
         let _ = std::fs::remove_file(&lock_path);

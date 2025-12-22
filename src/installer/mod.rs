@@ -2,13 +2,13 @@ use crate::cache::StoreEntry;
 use crate::lockfile::Lockfile;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
+use serde_json;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use serde_json;
+use std::sync::Arc;
+use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
 pub struct PackageInstance {
@@ -140,7 +140,10 @@ impl Installer {
             }
             let _ = std::fs::remove_dir_all(&dest);
             let _ = std::fs::remove_file(&dest);
-            if try_symlink_dir(&src, &dest)? { /* ok */ } else { let _ = link_or_copy_tree(&src, &dest)?; }
+            if try_symlink_dir(&src, &dest)? { /* ok */
+            } else {
+                let _ = link_or_copy_tree(&src, &dest)?;
+            }
         }
 
         // Materialize workspace node_modules in parallel: for each workspace folder,
@@ -176,7 +179,8 @@ impl Installer {
                             // (root .pacm always has the package even if not hoisted)
                             let target = pacm_root.join(&dep_name);
                             if target.exists() {
-                                let rel_target = PathBuf::from("../../node_modules/.pacm").join(&dep_name);
+                                let rel_target =
+                                    PathBuf::from("../../node_modules/.pacm").join(&dep_name);
                                 let _ = try_symlink_dir(&rel_target, &link_path);
                             }
                         }
@@ -216,36 +220,6 @@ impl Installer {
         Ok(outcomes)
     }
 
-    fn materialize(&self, store_entry: &StoreEntry, dest: &Path) -> Result<InstallMode> {
-        if dest.exists() || std::fs::symlink_metadata(dest).is_ok() {
-            fs::remove_dir_all(dest).or_else(|_| {
-                if dest.is_file() {
-                    fs::remove_file(dest)
-                } else {
-                    Err(std::io::Error::other("failed to remove existing destination"))
-                }
-            })?;
-        }
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        match self.mode {
-            InstallMode::Copy => {
-                copy_tree_only(store_entry.package_dir(), dest)?;
-                Ok(InstallMode::Copy)
-            }
-            InstallMode::Link => {
-                let linked = link_or_copy_tree(store_entry.package_dir(), dest)?;
-                if linked {
-                    Ok(InstallMode::Link)
-                } else {
-                    Ok(InstallMode::Copy)
-                }
-            }
-        }
-    }
-
     fn materialize_fast(&self, store_entry: &StoreEntry, dest: &Path) -> Result<InstallMode> {
         if dest.exists() || std::fs::symlink_metadata(dest).is_ok() {
             fs::remove_dir_all(dest).or_else(|_| {
@@ -271,7 +245,11 @@ impl Installer {
                     Ok(InstallMode::Link)
                 } else {
                     let linked = link_or_copy_tree(store_entry.package_dir(), dest)?;
-                    if linked { Ok(InstallMode::Link) } else { Ok(InstallMode::Copy) }
+                    if linked {
+                        Ok(InstallMode::Link)
+                    } else {
+                        Ok(InstallMode::Copy)
+                    }
                 }
             }
         }
@@ -351,7 +329,11 @@ fn try_symlink_dir(from: &Path, to: &Path) -> Result<bool> {
             Ok(_) => Ok(true),
             Err(e) => {
                 // Privilege not held: fall back
-                if let Some(code) = e.raw_os_error() { if code == 1314 { return Ok(false); } }
+                if let Some(code) = e.raw_os_error() {
+                    if code == 1314 {
+                        return Ok(false);
+                    }
+                }
                 Ok(false)
             }
         }
