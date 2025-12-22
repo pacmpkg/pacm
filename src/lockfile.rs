@@ -1,9 +1,9 @@
 use crate::error::Result;
 use crate::manifest::Manifest;
 use anyhow::{anyhow, bail, ensure, Context};
-use bincode::config::{legacy, standard};
-use bincode::serde::decode_from_slice;
-use bincode1::Options;
+use rawbin::config::{legacy, standard};
+use rawbin::serde::decode_from_slice;
+use rawbin::Options;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -412,7 +412,7 @@ where
     T: DeserializeOwned,
 {
     let cfg = standard().with_limit::<MAX_LOCKFILE_SIZE>();
-    std::panic::catch_unwind(|| decode_from_slice::<T, _>(data, cfg))
+    std::panic::catch_unwind(|| decode_from_slice::<T>(data, cfg))
         .ok()
         .and_then(|res| res.ok().map(|(value, _)| value))
 }
@@ -422,7 +422,7 @@ where
     T: DeserializeOwned,
 {
     let cfg = legacy().with_limit::<MAX_LOCKFILE_SIZE>();
-    std::panic::catch_unwind(|| decode_from_slice::<T, _>(data, cfg))
+    std::panic::catch_unwind(|| decode_from_slice::<T>(data, cfg))
         .ok()
         .and_then(|res| res.ok().map(|(value, _)| value))
 }
@@ -432,7 +432,7 @@ where
     T: DeserializeOwned,
 {
     std::panic::catch_unwind(|| {
-        bincode1::config::DefaultOptions::new()
+        Options::new()
             .with_limit(MAX_LOCKFILE_SIZE as u64)
             .allow_trailing_bytes()
             .deserialize::<T>(data)
@@ -446,7 +446,7 @@ where
     T: DeserializeOwned,
 {
     std::panic::catch_unwind(|| {
-        bincode1::config::DefaultOptions::new()
+        Options::new()
             .with_fixint_encoding()
             .with_limit(MAX_LOCKFILE_SIZE as u64)
             .allow_trailing_bytes()
